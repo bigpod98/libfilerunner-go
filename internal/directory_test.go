@@ -1,0 +1,114 @@
+package internal
+
+import (
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestDirectoryBackendClaimNext_PicksLexicographicallyAndMovesToInProgress(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	inputDir := filepath.Join(root, "input")
+	inProgressDir := filepath.Join(root, "in-progress")
+	failedDir := filepath.Join(root, "failed")
+
+	backend, err := NewDirectoryBackend(inputDir, inProgressDir, failedDir)
+	if err != nil {
+		t.Fatalf("NewDirectoryBackend() error = %v", err)
+	}
+	if err := backend.EnsureDirectories(); err != nil {
+		t.Fatalf("EnsureDirectories() error = %v", err)
+	}
+
+	mustWriteFile(t, filepath.Join(inputDir, "b.txt"), "b")
+	mustWriteFile(t, filepath.Join(inputDir, "a.txt"), "a")
+	if err := os.Mkdir(filepath.Join(inputDir, "subdir"), 0o755); err != nil {
+		t.Fatalf("Mkdir(subdir) error = %v", err)
+	}
+
+	claimed, err := backend.ClaimNext(context.Background())
+	if err != nil {
+		t.Fatalf("ClaimNext() error = %v", err)
+	}
+
+	if got, want := claimed.Name(), "a.txt"; got != want {
+		t.Fatalf("claimed.Name() = %q, want %q", got, want)
+	}
+	if got := claimed.Path(); filepath.Dir(got) != inProgressDir {
+		t.Fatalf("claimed.Path() dir = %q, want %q", filepath.Dir(got), inProgressDir)
+	}
+
+	if _, err := os.Stat(filepath.Join(inputDir, "a.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected input/a.txt to be moved, stat err = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(inProgressDir, "a.txt")); err != nil {
+		t.Fatalf("expected in-progress/a.txt to exist, stat err = %v", err)
+	}
+}
+
+func TestDirectoryBackendClaimNext_NoFileAvailable(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	backend, err := NewDirectoryBackend(
+		filepath.Join(root, "input"),
+		filepath.Join(root, "in-progress"),
+		filepath.Join(root, "failed"),
+	)
+	if err != nil {
+		t.Fatalf("NewDirectoryBackend() error = %v", err)
+	}
+	if err := backend.EnsureDirectories(); err != nil {
+		t.Fatalf("EnsureDirectories() error = %v", err)
+	}
+
+	_, err = backend.ClaimNext(context.Background())
+	if !errors.Is(err, ErrNoFileAvailable) {
+		t.Fatalf("ClaimNext() error = %v, want %v", err, ErrNoFileAvailable)
+	}
+}
+
+func TestClaimedFileMoveToFailed_AddsUniqueSuffixOnCollision(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	inProgressDir := filepath.Join(root, "in-progress")
+	failedDir := filepath.Join(root, "failed")
+	if err := os.MkdirAll(inProgressDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(in-progress) error = %v", err)
+	}
+	if err := os.MkdirAll(failedDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(failed) error = %v", err)
+	}
+
+	inProgressPath := filepath.Join(inProgressDir, "job.txt")
+	mustWriteFile(t, inProgressPath, "payload")
+	mustWriteFile(t, filepath.Join(failedDir, "job.txt"), "existing")
+
+	claimed := &ClaimedFile{name: "job.txt", path: inProgressPath}
+	dst, err := claimed.MoveToFailed(failedDir)
+	if err != nil {
+		t.Fatalf("MoveToFailed() error = %v", err)
+	}
+
+	if got, want := filepath.Base(dst), "job_1.txt"; got != want {
+		t.Fatalf("moved file = %q, want %q", got, want)
+	}
+	if _, err := os.Stat(dst); err != nil {
+		t.Fatalf("expected failed file to exist, stat err = %v", err)
+	}
+	if _, err := os.Stat(inProgressPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected original in-progress file removed, stat err = %v", err)
+	}
+}
+
+func mustWriteFile(t *testing.T, path, contents string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", path, err)
+	}
+}
