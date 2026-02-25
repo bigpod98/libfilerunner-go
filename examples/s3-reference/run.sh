@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-set -euo pipefail
 
 if [[ -z "${LIBFILERUNNER_S3_BUCKET:-}" ]]; then
   echo "LIBFILERUNNER_S3_BUCKET is required"
