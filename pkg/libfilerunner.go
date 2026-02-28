@@ -148,12 +148,14 @@ func (r *DirectoryRunner) RunOnce(ctx context.Context, handler Handler) (RunOnce
 	job := FileJob{
 		Name: claimed.Name(),
 		Path: claimed.Path(),
-		open: claimed.Open,
+		open: func() (io.ReadCloser, error) {
+			return claimed.Open(ctx)
+		},
 	}
 
 	if handlerErr := handler(ctx, job); handlerErr != nil {
 		result.HandlerErr = handlerErr
-		failedPath, moveErr := claimed.MoveToFailed(r.backend.FailedDir)
+		failedPath, moveErr := claimed.MoveToFailed(ctx, r.backend.FailedDir)
 		if moveErr != nil {
 			return result, fmt.Errorf("handler failed: %w; additionally failed to move file to failed directory: %v", handlerErr, moveErr)
 		}
@@ -161,7 +163,7 @@ func (r *DirectoryRunner) RunOnce(ctx context.Context, handler Handler) (RunOnce
 		return result, handlerErr
 	}
 
-	if err := claimed.Delete(); err != nil {
+	if err := claimed.Delete(ctx); err != nil {
 		return result, err
 	}
 
@@ -198,12 +200,14 @@ func (r *S3Runner) RunOnce(ctx context.Context, handler Handler) (RunOnceResult,
 	job := FileJob{
 		Name: claimed.Name(),
 		Path: claimed.Path(),
-		open: claimed.Open,
+		open: func() (io.ReadCloser, error) {
+			return claimed.Open(ctx)
+		},
 	}
 
 	if handlerErr := handler(ctx, job); handlerErr != nil {
 		result.HandlerErr = handlerErr
-		failedPath, moveErr := claimed.MoveToFailed(r.backend.FailedPrefix)
+		failedPath, moveErr := claimed.MoveToFailed(ctx, r.backend.FailedPrefix)
 		if moveErr != nil {
 			return result, fmt.Errorf("handler failed: %w; additionally failed to move file to failed directory: %v", handlerErr, moveErr)
 		}
@@ -211,7 +215,7 @@ func (r *S3Runner) RunOnce(ctx context.Context, handler Handler) (RunOnceResult,
 		return result, handlerErr
 	}
 
-	if err := claimed.Delete(); err != nil {
+	if err := claimed.Delete(ctx); err != nil {
 		return result, err
 	}
 
@@ -248,12 +252,14 @@ func (r *AzureBlobRunner) RunOnce(ctx context.Context, handler Handler) (RunOnce
 	job := FileJob{
 		Name: claimed.Name(),
 		Path: claimed.Path(),
-		open: claimed.Open,
+		open: func() (io.ReadCloser, error) {
+			return claimed.Open(ctx)
+		},
 	}
 
 	if handlerErr := handler(ctx, job); handlerErr != nil {
 		result.HandlerErr = handlerErr
-		failedPath, moveErr := claimed.MoveToFailed(r.backend.FailedPrefix)
+		failedPath, moveErr := claimed.MoveToFailed(ctx, r.backend.FailedPrefix)
 		if moveErr != nil {
 			return result, fmt.Errorf("handler failed: %w; additionally failed to move file to failed directory: %v", handlerErr, moveErr)
 		}
@@ -261,7 +267,7 @@ func (r *AzureBlobRunner) RunOnce(ctx context.Context, handler Handler) (RunOnce
 		return result, handlerErr
 	}
 
-	if err := claimed.Delete(); err != nil {
+	if err := claimed.Delete(ctx); err != nil {
 		return result, err
 	}
 

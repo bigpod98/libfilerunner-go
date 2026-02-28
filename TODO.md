@@ -5,7 +5,7 @@ Track planned work for the `v1.1.0` release here.
 ## Development Flow (single ordered list)
 
 - [x] Add config validation to prevent overlapping input/in-progress/failed targets
-- [ ] Propagate caller `context.Context` through open/delete/fail operations (avoid internal `context.Background()` in runtime paths)
+- [x] Propagate caller `context.Context` through open/delete/fail operations (avoid internal `context.Background()` in runtime paths)
 - [ ] Add orchestration-oriented variants of `RunOnce` and `Run` for coordinating remote workers
   - Note: this step only pulls the file and places it in the working bucket, then stops until the next method is called
 - [ ] Add task check-in methods for worker status reporting (`Completed` and `Failed`)

@@ -90,7 +90,7 @@ func TestClaimedFileMoveToFailed_AddsUniqueSuffixOnCollision(t *testing.T) {
 	mustWriteFile(t, filepath.Join(failedDir, "job.txt"), "existing")
 
 	claimed := &ClaimedFile{name: "job.txt", path: inProgressPath}
-	dst, err := claimed.MoveToFailed(failedDir)
+	dst, err := claimed.MoveToFailed(context.Background(), failedDir)
 	if err != nil {
 		t.Fatalf("MoveToFailed() error = %v", err)
 	}
@@ -103,6 +103,41 @@ func TestClaimedFileMoveToFailed_AddsUniqueSuffixOnCollision(t *testing.T) {
 	}
 	if _, err := os.Stat(inProgressPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("expected original in-progress file removed, stat err = %v", err)
+	}
+}
+
+func TestClaimedFileOperations_RespectCanceledContext(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	inProgressDir := filepath.Join(root, "in-progress")
+	failedDir := filepath.Join(root, "failed")
+	if err := os.MkdirAll(inProgressDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(in-progress) error = %v", err)
+	}
+	if err := os.MkdirAll(failedDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(failed) error = %v", err)
+	}
+
+	inProgressPath := filepath.Join(inProgressDir, "job.txt")
+	mustWriteFile(t, inProgressPath, "payload")
+
+	claimed := &ClaimedFile{name: "job.txt", path: inProgressPath}
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if _, err := claimed.Open(canceledCtx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Open() error = %v, want %v", err, context.Canceled)
+	}
+	if err := claimed.Delete(canceledCtx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Delete() error = %v, want %v", err, context.Canceled)
+	}
+	if _, err := claimed.MoveToFailed(canceledCtx, failedDir); !errors.Is(err, context.Canceled) {
+		t.Fatalf("MoveToFailed() error = %v, want %v", err, context.Canceled)
+	}
+
+	if _, err := os.Stat(inProgressPath); err != nil {
+		t.Fatalf("expected source file to remain, stat err = %v", err)
 	}
 }
 

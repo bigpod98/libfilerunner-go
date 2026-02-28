@@ -226,17 +226,26 @@ func (o *ClaimedAzureBlob) Path() string {
 	return o.key
 }
 
-func (o *ClaimedAzureBlob) Open() (io.ReadCloser, error) {
-	return o.client.OpenBlob(context.Background(), o.key)
+func (o *ClaimedAzureBlob) Open(ctx context.Context) (io.ReadCloser, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return o.client.OpenBlob(ctx, o.key)
 }
 
-func (o *ClaimedAzureBlob) Delete() error {
-	return o.client.DeleteBlob(context.Background(), o.key)
+func (o *ClaimedAzureBlob) Delete(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return o.client.DeleteBlob(ctx, o.key)
 }
 
 // MoveToFailed moves the in-progress blob into the failed prefix.
 // If the target blob already exists, a unique suffix is added.
-func (o *ClaimedAzureBlob) MoveToFailed(failedPrefix string) (string, error) {
+func (o *ClaimedAzureBlob) MoveToFailed(ctx context.Context, failedPrefix string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	b := &AzureBlobBackend{
 		Container:    o.container,
 		FailedPrefix: normalizePrefix(failedPrefix),
@@ -244,15 +253,15 @@ func (o *ClaimedAzureBlob) MoveToFailed(failedPrefix string) (string, error) {
 	}
 
 	base := b.FailedPrefix + path.Base(o.name)
-	dstKey, err := b.uniqueDestinationKey(context.Background(), base)
+	dstKey, err := b.uniqueDestinationKey(ctx, base)
 	if err != nil {
 		return "", err
 	}
 
-	if err := b.copyBlob(context.Background(), o.key, dstKey); err != nil {
+	if err := b.copyBlob(ctx, o.key, dstKey); err != nil {
 		return "", err
 	}
-	if err := b.deleteBlob(context.Background(), o.key); err != nil {
+	if err := b.deleteBlob(ctx, o.key); err != nil {
 		return "", err
 	}
 

@@ -161,8 +161,11 @@ func (o *ClaimedS3Object) Path() string {
 	return o.key
 }
 
-func (o *ClaimedS3Object) Open() (io.ReadCloser, error) {
-	res, err := o.client.GetObject(context.Background(), &s3.GetObjectInput{
+func (o *ClaimedS3Object) Open(ctx context.Context) (io.ReadCloser, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	res, err := o.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(o.bucket),
 		Key:    aws.String(o.key),
 	})
@@ -172,8 +175,11 @@ func (o *ClaimedS3Object) Open() (io.ReadCloser, error) {
 	return res.Body, nil
 }
 
-func (o *ClaimedS3Object) Delete() error {
-	_, err := o.client.DeleteObject(context.Background(), &s3.DeleteObjectInput{
+func (o *ClaimedS3Object) Delete(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	_, err := o.client.DeleteObject(ctx, &s3.DeleteObjectInput{
 		Bucket: aws.String(o.bucket),
 		Key:    aws.String(o.key),
 	})
@@ -182,7 +188,10 @@ func (o *ClaimedS3Object) Delete() error {
 
 // MoveToFailed moves the in-progress object into the failed prefix.
 // If the target object already exists, a unique suffix is added.
-func (o *ClaimedS3Object) MoveToFailed(failedPrefix string) (string, error) {
+func (o *ClaimedS3Object) MoveToFailed(ctx context.Context, failedPrefix string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	b := &S3Backend{
 		Bucket:       o.bucket,
 		FailedPrefix: normalizePrefix(failedPrefix),
@@ -190,15 +199,15 @@ func (o *ClaimedS3Object) MoveToFailed(failedPrefix string) (string, error) {
 	}
 
 	base := b.FailedPrefix + path.Base(o.name)
-	dstKey, err := b.uniqueDestinationKey(context.Background(), base)
+	dstKey, err := b.uniqueDestinationKey(ctx, base)
 	if err != nil {
 		return "", err
 	}
 
-	if err := b.copyObject(context.Background(), o.key, dstKey); err != nil {
+	if err := b.copyObject(ctx, o.key, dstKey); err != nil {
 		return "", err
 	}
-	if err := b.deleteObject(context.Background(), o.key); err != nil {
+	if err := b.deleteObject(ctx, o.key); err != nil {
 		return "", err
 	}
 

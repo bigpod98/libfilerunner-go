@@ -3,6 +3,7 @@ package internal
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"sort"
 	"strings"
@@ -80,7 +81,7 @@ func TestClaimedAzureBlobMoveToFailed_AddsUniqueSuffixOnCollision(t *testing.T) 
 		client:    client,
 	}
 
-	dst, err := claimed.MoveToFailed("failed")
+	dst, err := claimed.MoveToFailed(context.Background(), "failed")
 	if err != nil {
 		t.Fatalf("MoveToFailed() error = %v", err)
 	}
@@ -110,7 +111,7 @@ func TestClaimedAzureBlobOpenAndDelete(t *testing.T) {
 		client:    client,
 	}
 
-	rc, err := claimed.Open()
+	rc, err := claimed.Open(context.Background())
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
@@ -124,11 +125,43 @@ func TestClaimedAzureBlobOpenAndDelete(t *testing.T) {
 		t.Fatalf("open data = %q, want %q", got, want)
 	}
 
-	if err := claimed.Delete(); err != nil {
+	if err := claimed.Delete(context.Background()); err != nil {
 		t.Fatalf("Delete() error = %v", err)
 	}
 	if client.has("in-progress/job.txt") {
 		t.Fatalf("expected blob to be deleted")
+	}
+}
+
+func TestClaimedAzureBlobOperations_RespectCanceledContext(t *testing.T) {
+	t.Parallel()
+
+	client := newMockAzureBlobClient(map[string][]byte{
+		"in-progress/job.txt": []byte("hello"),
+	})
+
+	claimed := &ClaimedAzureBlob{
+		container: "container",
+		name:      "job.txt",
+		key:       "in-progress/job.txt",
+		client:    client,
+	}
+
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if _, err := claimed.Open(canceledCtx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Open() error = %v, want %v", err, context.Canceled)
+	}
+	if err := claimed.Delete(canceledCtx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Delete() error = %v, want %v", err, context.Canceled)
+	}
+	if _, err := claimed.MoveToFailed(canceledCtx, "failed"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("MoveToFailed() error = %v, want %v", err, context.Canceled)
+	}
+
+	if !client.has("in-progress/job.txt") {
+		t.Fatalf("expected source blob to remain")
 	}
 }
 

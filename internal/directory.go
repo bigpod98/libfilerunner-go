@@ -113,19 +113,31 @@ func (f *ClaimedFile) Path() string {
 	return f.path
 }
 
-func (f *ClaimedFile) Open() (io.ReadCloser, error) {
+func (f *ClaimedFile) Open(ctx context.Context) (io.ReadCloser, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	return os.Open(f.path)
 }
 
-func (f *ClaimedFile) Delete() error {
+func (f *ClaimedFile) Delete(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	return os.Remove(f.path)
 }
 
 // MoveToFailed moves the in-progress file into the failed directory.
 // If the target file already exists, a unique suffix is added.
-func (f *ClaimedFile) MoveToFailed(failedDir string) (string, error) {
+func (f *ClaimedFile) MoveToFailed(ctx context.Context, failedDir string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	dst, err := uniqueDestination(failedDir, f.name)
 	if err != nil {
+		return "", err
+	}
+	if err := ctx.Err(); err != nil {
 		return "", err
 	}
 	if err := os.Rename(f.path, dst); err != nil {
