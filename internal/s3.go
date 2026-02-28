@@ -89,6 +89,9 @@ func NewS3BackendFromClient(client s3API, bucket, inputPrefix, inProgressPrefix,
 	if strings.TrimSpace(failedPrefix) == "" {
 		return nil, errors.New("failed prefix is required")
 	}
+	if err := validateNonOverlappingPrefixes(inputPrefix, inProgressPrefix, failedPrefix); err != nil {
+		return nil, err
+	}
 
 	return &S3Backend{
 		Bucket:           bucket,

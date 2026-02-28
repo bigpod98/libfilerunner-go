@@ -154,6 +154,9 @@ func NewAzureBlobBackendFromClient(client azureBlobAPI, container, inputPrefix, 
 	if strings.TrimSpace(failedPrefix) == "" {
 		return nil, errors.New("failed prefix is required")
 	}
+	if err := validateNonOverlappingPrefixes(inputPrefix, inProgressPrefix, failedPrefix); err != nil {
+		return nil, err
+	}
 
 	return &AzureBlobBackend{
 		Container:        container,

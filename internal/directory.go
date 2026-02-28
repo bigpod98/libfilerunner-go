@@ -36,6 +36,9 @@ func NewDirectoryBackend(inputDir, inProgressDir, failedDir string) (*DirectoryB
 	if strings.TrimSpace(failedDir) == "" {
 		return nil, errors.New("failed directory is required")
 	}
+	if err := validateNonOverlappingDirectories(inputDir, inProgressDir, failedDir); err != nil {
+		return nil, err
+	}
 
 	return &DirectoryBackend{
 		InputDir:      inputDir,
