@@ -119,9 +119,6 @@ func NewS3Runner(cfg S3Config) (*S3Runner, error) {
 	if err != nil {
 		return nil, err
 	}
-	if claimDirs {
-		return nil, errors.New("S3 directory targets are not supported yet")
-	}
 
 	backend, err := libinternal.NewS3Backend(
 		cfg.Region,
@@ -133,6 +130,7 @@ func NewS3Runner(cfg S3Config) (*S3Runner, error) {
 	if err != nil {
 		return nil, err
 	}
+	backend.ClaimDirs = claimDirs
 	return &S3Runner{backend: backend, batchSize: normalizeBatchSize(cfg.BatchSize)}, nil
 }
 
@@ -140,9 +138,6 @@ func NewAzureBlobRunner(cfg AzureBlobConfig) (*AzureBlobRunner, error) {
 	claimDirs, err := normalizeSelectTarget(cfg.SelectTarget)
 	if err != nil {
 		return nil, err
-	}
-	if claimDirs {
-		return nil, errors.New("Azure Blob directory targets are not supported yet")
 	}
 
 	backend, err := libinternal.NewAzureBlobBackend(
@@ -155,6 +150,7 @@ func NewAzureBlobRunner(cfg AzureBlobConfig) (*AzureBlobRunner, error) {
 	if err != nil {
 		return nil, err
 	}
+	backend.ClaimDirs = claimDirs
 	return &AzureBlobRunner{backend: backend, batchSize: normalizeBatchSize(cfg.BatchSize)}, nil
 }
 

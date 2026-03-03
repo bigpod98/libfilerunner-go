@@ -413,34 +413,18 @@ func TestDirectoryRunnerRunOnceOrchestration_DirectoryTargetModeClaimsDirectory(
 	}
 }
 
-func TestNewS3Runner_RejectsDirectoryTargetMode(t *testing.T) {
+func TestNewDirectoryRunner_RejectsInvalidSelectTarget(t *testing.T) {
 	t.Parallel()
 
-	_, err := libfilerunner.NewS3Runner(libfilerunner.S3Config{
-		Bucket:           "bucket",
-		InputPrefix:      "input",
-		InProgressPrefix: "in-progress",
-		FailedPrefix:     "failed",
-		SelectTarget:     libfilerunner.SelectTargetDirectories,
+	root := t.TempDir()
+	_, err := libfilerunner.NewDirectoryRunner(libfilerunner.DirectoryConfig{
+		InputDir:      filepath.Join(root, "input"),
+		InProgressDir: filepath.Join(root, "in-progress"),
+		FailedDir:     filepath.Join(root, "failed"),
+		SelectTarget:  libfilerunner.SelectTarget("invalid"),
 	})
 	if err == nil {
-		t.Fatalf("NewS3Runner() error = nil, want unsupported directory-target error")
-	}
-}
-
-func TestNewAzureBlobRunner_RejectsDirectoryTargetMode(t *testing.T) {
-	t.Parallel()
-
-	_, err := libfilerunner.NewAzureBlobRunner(libfilerunner.AzureBlobConfig{
-		AccountURL:       "https://example.blob.core.windows.net/",
-		Container:        "container",
-		InputPrefix:      "input",
-		InProgressPrefix: "in-progress",
-		FailedPrefix:     "failed",
-		SelectTarget:     libfilerunner.SelectTargetDirectories,
-	})
-	if err == nil {
-		t.Fatalf("NewAzureBlobRunner() error = nil, want unsupported directory-target error")
+		t.Fatalf("NewDirectoryRunner() error = nil, want invalid select-target error")
 	}
 }
 

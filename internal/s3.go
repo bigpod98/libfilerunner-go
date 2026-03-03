@@ -29,6 +29,7 @@ type S3Backend struct {
 	InputPrefix      string
 	InProgressPrefix string
 	FailedPrefix     string
+	ClaimDirs        bool
 	client           s3API
 }
 
@@ -37,6 +38,7 @@ type ClaimedS3Object struct {
 	bucket string
 	name   string
 	key    string
+	isDir  bool
 	client s3API
 }
 
@@ -114,6 +116,10 @@ func (b *S3Backend) ClaimNext(ctx context.Context) (*ClaimedS3Object, error) {
 		return nil, err
 	}
 
+	if b.ClaimDirs {
+		return b.claimNextDirectory(ctx, keys)
+	}
+
 	for _, srcKey := range keys {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -153,6 +159,40 @@ func (b *S3Backend) ClaimNext(ctx context.Context) (*ClaimedS3Object, error) {
 	return nil, ErrNoFileAvailable
 }
 
+func (b *S3Backend) claimNextDirectory(ctx context.Context, keys []string) (*ClaimedS3Object, error) {
+	dirSuffixes := firstLevelDirectorySuffixes(keys, b.InputPrefix)
+	for _, dirSuffix := range dirSuffixes {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
+		srcPrefix := b.InputPrefix + dirSuffix
+		dstPrefix, err := b.uniqueDestinationPrefix(ctx, b.InProgressPrefix+dirSuffix)
+		if err != nil {
+			return nil, err
+		}
+
+		claimedAny, err := b.copyThenDeletePrefix(ctx, srcPrefix, dstPrefix)
+		if err != nil {
+			return nil, err
+		}
+		if !claimedAny {
+			continue
+		}
+
+		trimmed := strings.TrimSuffix(dstPrefix, "/")
+		return &ClaimedS3Object{
+			bucket: b.Bucket,
+			name:   path.Base(trimmed),
+			key:    dstPrefix,
+			isDir:  true,
+			client: b.client,
+		}, nil
+	}
+
+	return nil, ErrNoFileAvailable
+}
+
 func (b *S3Backend) CompleteClaim(ctx context.Context, inProgressKey string) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -162,6 +202,9 @@ func (b *S3Backend) CompleteClaim(ctx context.Context, inProgressKey string) err
 	}
 	if !strings.HasPrefix(inProgressKey, b.InProgressPrefix) {
 		return errors.New("in-progress key is not in the configured in-progress prefix")
+	}
+	if b.ClaimDirs {
+		return b.deleteAllWithPrefix(ctx, ensureTrailingSlash(inProgressKey))
 	}
 	return b.deleteObject(ctx, inProgressKey)
 }
@@ -175,6 +218,18 @@ func (b *S3Backend) FailClaim(ctx context.Context, inProgressKey string) (string
 	}
 	if !strings.HasPrefix(inProgressKey, b.InProgressPrefix) {
 		return "", errors.New("in-progress key is not in the configured in-progress prefix")
+	}
+	if b.ClaimDirs {
+		srcPrefix := ensureTrailingSlash(inProgressKey)
+		baseName := path.Base(strings.TrimSuffix(srcPrefix, "/"))
+		dstPrefix, err := b.uniqueDestinationPrefix(ctx, b.FailedPrefix+baseName+"/")
+		if err != nil {
+			return "", err
+		}
+		if _, err := b.copyThenDeletePrefix(ctx, srcPrefix, dstPrefix); err != nil {
+			return "", err
+		}
+		return dstPrefix, nil
 	}
 
 	claimed := &ClaimedS3Object{
@@ -198,6 +253,9 @@ func (o *ClaimedS3Object) Open(ctx context.Context) (io.ReadCloser, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	if o.isDir {
+		return nil, errors.New("cannot open directory claim")
+	}
 	res, err := o.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(o.bucket),
 		Key:    aws.String(o.key),
@@ -211,6 +269,10 @@ func (o *ClaimedS3Object) Open(ctx context.Context) (io.ReadCloser, error) {
 func (o *ClaimedS3Object) Delete(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	if o.isDir {
+		b := &S3Backend{Bucket: o.bucket, client: o.client}
+		return b.deleteAllWithPrefix(ctx, ensureTrailingSlash(o.key))
 	}
 	_, err := o.client.DeleteObject(ctx, &s3.DeleteObjectInput{
 		Bucket: aws.String(o.bucket),
@@ -229,6 +291,20 @@ func (o *ClaimedS3Object) MoveToFailed(ctx context.Context, failedPrefix string)
 		Bucket:       o.bucket,
 		FailedPrefix: normalizePrefix(failedPrefix),
 		client:       o.client,
+	}
+
+	if o.isDir {
+		basePrefix := b.FailedPrefix + path.Base(strings.TrimSuffix(o.key, "/")) + "/"
+		dstPrefix, err := b.uniqueDestinationPrefix(ctx, basePrefix)
+		if err != nil {
+			return "", err
+		}
+		if _, err := b.copyThenDeletePrefix(ctx, ensureTrailingSlash(o.key), dstPrefix); err != nil {
+			return "", err
+		}
+		o.key = dstPrefix
+		o.name = path.Base(strings.TrimSuffix(dstPrefix, "/"))
+		return dstPrefix, nil
 	}
 
 	base := b.FailedPrefix + path.Base(o.name)
@@ -250,6 +326,10 @@ func (o *ClaimedS3Object) MoveToFailed(ctx context.Context, failedPrefix string)
 }
 
 func (b *S3Backend) listInputKeys(ctx context.Context) ([]string, error) {
+	return b.listKeysWithPrefix(ctx, b.InputPrefix)
+}
+
+func (b *S3Backend) listKeysWithPrefix(ctx context.Context, prefix string) ([]string, error) {
 	keys := make([]string, 0)
 	var token *string
 
@@ -260,7 +340,7 @@ func (b *S3Backend) listInputKeys(ctx context.Context) ([]string, error) {
 
 		out, err := b.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
 			Bucket:            aws.String(b.Bucket),
-			Prefix:            aws.String(b.InputPrefix),
+			Prefix:            aws.String(prefix),
 			ContinuationToken: token,
 		})
 		if err != nil {
@@ -272,7 +352,7 @@ func (b *S3Backend) listInputKeys(ctx context.Context) ([]string, error) {
 				continue
 			}
 			key := *obj.Key
-			if key == b.InputPrefix || strings.HasSuffix(key, "/") {
+			if key == prefix || strings.HasSuffix(key, "/") {
 				continue
 			}
 			keys = append(keys, key)
@@ -286,6 +366,110 @@ func (b *S3Backend) listInputKeys(ctx context.Context) ([]string, error) {
 
 	sort.Strings(keys)
 	return keys, nil
+}
+
+func (b *S3Backend) copyThenDeletePrefix(ctx context.Context, srcPrefix, dstPrefix string) (bool, error) {
+	keys, err := b.listKeysWithPrefix(ctx, srcPrefix)
+	if err != nil {
+		return false, err
+	}
+	if len(keys) == 0 {
+		return false, nil
+	}
+
+	for _, srcKey := range keys {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		rel := strings.TrimPrefix(srcKey, srcPrefix)
+		dstKey := dstPrefix + rel
+		if err := b.copyObject(ctx, srcKey, dstKey); err != nil {
+			if isNotFoundError(err) {
+				return false, nil
+			}
+			return false, err
+		}
+		if err := b.deleteObject(ctx, srcKey); err != nil {
+			return false, err
+		}
+	}
+
+	return true, nil
+}
+
+func (b *S3Backend) deleteAllWithPrefix(ctx context.Context, prefix string) error {
+	keys, err := b.listKeysWithPrefix(ctx, prefix)
+	if err != nil {
+		return err
+	}
+	for _, key := range keys {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := b.deleteObject(ctx, key); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (b *S3Backend) uniqueDestinationPrefix(ctx context.Context, basePrefix string) (string, error) {
+	basePrefix = ensureTrailingSlash(basePrefix)
+	exists, err := b.prefixExists(ctx, basePrefix)
+	if err != nil {
+		return "", err
+	}
+	if !exists {
+		return basePrefix, nil
+	}
+
+	trimmed := strings.TrimSuffix(basePrefix, "/")
+	dir, file := path.Split(trimmed)
+	for i := 1; ; i++ {
+		candidate := dir + file + "_" + itoa(i) + "/"
+		exists, err := b.prefixExists(ctx, candidate)
+		if err != nil {
+			return "", err
+		}
+		if !exists {
+			return candidate, nil
+		}
+	}
+}
+
+func (b *S3Backend) prefixExists(ctx context.Context, prefix string) (bool, error) {
+	keys, err := b.listKeysWithPrefix(ctx, prefix)
+	if err != nil {
+		return false, err
+	}
+	return len(keys) > 0, nil
+}
+
+func firstLevelDirectorySuffixes(keys []string, inputPrefix string) []string {
+	seen := make(map[string]struct{})
+	dirs := make([]string, 0)
+	for _, key := range keys {
+		suffix := strings.TrimPrefix(key, inputPrefix)
+		idx := strings.Index(suffix, "/")
+		if idx <= 0 {
+			continue
+		}
+		dir := suffix[:idx+1]
+		if _, ok := seen[dir]; ok {
+			continue
+		}
+		seen[dir] = struct{}{}
+		dirs = append(dirs, dir)
+	}
+	sort.Strings(dirs)
+	return dirs
+}
+
+func ensureTrailingSlash(key string) string {
+	if strings.HasSuffix(key, "/") {
+		return key
+	}
+	return key + "/"
 }
 
 func (b *S3Backend) uniqueDestinationKey(ctx context.Context, baseKey string) (string, error) {

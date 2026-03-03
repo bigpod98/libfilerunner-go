@@ -91,6 +91,7 @@ type AzureBlobBackend struct {
 	InputPrefix      string
 	InProgressPrefix string
 	FailedPrefix     string
+	ClaimDirs        bool
 	client           azureBlobAPI
 }
 
@@ -99,6 +100,7 @@ type ClaimedAzureBlob struct {
 	container string
 	name      string
 	key       string
+	isDir     bool
 	client    azureBlobAPI
 }
 
@@ -179,6 +181,10 @@ func (b *AzureBlobBackend) ClaimNext(ctx context.Context) (*ClaimedAzureBlob, er
 		return nil, err
 	}
 
+	if b.ClaimDirs {
+		return b.claimNextDirectory(ctx, keys)
+	}
+
 	for _, srcKey := range keys {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -218,6 +224,40 @@ func (b *AzureBlobBackend) ClaimNext(ctx context.Context) (*ClaimedAzureBlob, er
 	return nil, ErrNoFileAvailable
 }
 
+func (b *AzureBlobBackend) claimNextDirectory(ctx context.Context, keys []string) (*ClaimedAzureBlob, error) {
+	dirSuffixes := firstLevelDirectorySuffixes(keys, b.InputPrefix)
+	for _, dirSuffix := range dirSuffixes {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
+		srcPrefix := b.InputPrefix + dirSuffix
+		dstPrefix, err := b.uniqueDestinationPrefix(ctx, b.InProgressPrefix+dirSuffix)
+		if err != nil {
+			return nil, err
+		}
+
+		claimedAny, err := b.copyThenDeletePrefix(ctx, srcPrefix, dstPrefix)
+		if err != nil {
+			return nil, err
+		}
+		if !claimedAny {
+			continue
+		}
+
+		trimmed := strings.TrimSuffix(dstPrefix, "/")
+		return &ClaimedAzureBlob{
+			container: b.Container,
+			name:      path.Base(trimmed),
+			key:       dstPrefix,
+			isDir:     true,
+			client:    b.client,
+		}, nil
+	}
+
+	return nil, ErrNoFileAvailable
+}
+
 func (b *AzureBlobBackend) CompleteClaim(ctx context.Context, inProgressKey string) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -227,6 +267,9 @@ func (b *AzureBlobBackend) CompleteClaim(ctx context.Context, inProgressKey stri
 	}
 	if !strings.HasPrefix(inProgressKey, b.InProgressPrefix) {
 		return errors.New("in-progress key is not in the configured in-progress prefix")
+	}
+	if b.ClaimDirs {
+		return b.deleteAllWithPrefix(ctx, ensureTrailingSlash(inProgressKey))
 	}
 	return b.deleteBlob(ctx, inProgressKey)
 }
@@ -240,6 +283,18 @@ func (b *AzureBlobBackend) FailClaim(ctx context.Context, inProgressKey string) 
 	}
 	if !strings.HasPrefix(inProgressKey, b.InProgressPrefix) {
 		return "", errors.New("in-progress key is not in the configured in-progress prefix")
+	}
+	if b.ClaimDirs {
+		srcPrefix := ensureTrailingSlash(inProgressKey)
+		baseName := path.Base(strings.TrimSuffix(srcPrefix, "/"))
+		dstPrefix, err := b.uniqueDestinationPrefix(ctx, b.FailedPrefix+baseName+"/")
+		if err != nil {
+			return "", err
+		}
+		if _, err := b.copyThenDeletePrefix(ctx, srcPrefix, dstPrefix); err != nil {
+			return "", err
+		}
+		return dstPrefix, nil
 	}
 
 	claimed := &ClaimedAzureBlob{
@@ -263,12 +318,19 @@ func (o *ClaimedAzureBlob) Open(ctx context.Context) (io.ReadCloser, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	if o.isDir {
+		return nil, errors.New("cannot open directory claim")
+	}
 	return o.client.OpenBlob(ctx, o.key)
 }
 
 func (o *ClaimedAzureBlob) Delete(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	if o.isDir {
+		b := &AzureBlobBackend{client: o.client}
+		return b.deleteAllWithPrefix(ctx, ensureTrailingSlash(o.key))
 	}
 	return o.client.DeleteBlob(ctx, o.key)
 }
@@ -283,6 +345,20 @@ func (o *ClaimedAzureBlob) MoveToFailed(ctx context.Context, failedPrefix string
 		Container:    o.container,
 		FailedPrefix: normalizePrefix(failedPrefix),
 		client:       o.client,
+	}
+
+	if o.isDir {
+		basePrefix := b.FailedPrefix + path.Base(strings.TrimSuffix(o.key, "/")) + "/"
+		dstPrefix, err := b.uniqueDestinationPrefix(ctx, basePrefix)
+		if err != nil {
+			return "", err
+		}
+		if _, err := b.copyThenDeletePrefix(ctx, ensureTrailingSlash(o.key), dstPrefix); err != nil {
+			return "", err
+		}
+		o.key = dstPrefix
+		o.name = path.Base(strings.TrimSuffix(dstPrefix, "/"))
+		return dstPrefix, nil
 	}
 
 	base := b.FailedPrefix + path.Base(o.name)
@@ -304,14 +380,18 @@ func (o *ClaimedAzureBlob) MoveToFailed(ctx context.Context, failedPrefix string
 }
 
 func (b *AzureBlobBackend) listInputKeys(ctx context.Context) ([]string, error) {
-	keys, err := b.client.ListBlobNames(ctx, b.InputPrefix)
+	return b.listKeysWithPrefix(ctx, b.InputPrefix)
+}
+
+func (b *AzureBlobBackend) listKeysWithPrefix(ctx context.Context, prefix string) ([]string, error) {
+	keys, err := b.client.ListBlobNames(ctx, prefix)
 	if err != nil {
 		return nil, err
 	}
 
 	filtered := make([]string, 0, len(keys))
 	for _, key := range keys {
-		if key == b.InputPrefix || strings.HasSuffix(key, "/") {
+		if key == prefix || strings.HasSuffix(key, "/") {
 			continue
 		}
 		filtered = append(filtered, key)
@@ -319,6 +399,83 @@ func (b *AzureBlobBackend) listInputKeys(ctx context.Context) ([]string, error) 
 
 	sort.Strings(filtered)
 	return filtered, nil
+}
+
+func (b *AzureBlobBackend) copyThenDeletePrefix(ctx context.Context, srcPrefix, dstPrefix string) (bool, error) {
+	keys, err := b.listKeysWithPrefix(ctx, srcPrefix)
+	if err != nil {
+		return false, err
+	}
+	if len(keys) == 0 {
+		return false, nil
+	}
+
+	for _, srcKey := range keys {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		rel := strings.TrimPrefix(srcKey, srcPrefix)
+		dstKey := dstPrefix + rel
+		if err := b.copyBlob(ctx, srcKey, dstKey); err != nil {
+			if isAzureNotFoundError(err) {
+				return false, nil
+			}
+			return false, err
+		}
+		if err := b.deleteBlob(ctx, srcKey); err != nil {
+			return false, err
+		}
+	}
+
+	return true, nil
+}
+
+func (b *AzureBlobBackend) deleteAllWithPrefix(ctx context.Context, prefix string) error {
+	keys, err := b.listKeysWithPrefix(ctx, prefix)
+	if err != nil {
+		return err
+	}
+	for _, key := range keys {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := b.deleteBlob(ctx, key); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (b *AzureBlobBackend) uniqueDestinationPrefix(ctx context.Context, basePrefix string) (string, error) {
+	basePrefix = ensureTrailingSlash(basePrefix)
+	exists, err := b.prefixExists(ctx, basePrefix)
+	if err != nil {
+		return "", err
+	}
+	if !exists {
+		return basePrefix, nil
+	}
+
+	trimmed := strings.TrimSuffix(basePrefix, "/")
+	dir, file := path.Split(trimmed)
+	for i := 1; ; i++ {
+		candidate := dir + file + "_" + itoa(i) + "/"
+		exists, err := b.prefixExists(ctx, candidate)
+		if err != nil {
+			return "", err
+		}
+		if !exists {
+			return candidate, nil
+		}
+	}
+}
+
+func (b *AzureBlobBackend) prefixExists(ctx context.Context, prefix string) (bool, error) {
+	keys, err := b.listKeysWithPrefix(ctx, prefix)
+	if err != nil {
+		return false, err
+	}
+	return len(keys) > 0, nil
 }
 
 func (b *AzureBlobBackend) uniqueDestinationKey(ctx context.Context, baseKey string) (string, error) {

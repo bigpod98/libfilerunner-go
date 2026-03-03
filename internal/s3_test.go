@@ -69,6 +69,40 @@ func TestS3BackendClaimNext_NoFileAvailable(t *testing.T) {
 	}
 }
 
+func TestS3BackendClaimNext_DirectoryTargetModeClaimsDirectoryPrefix(t *testing.T) {
+	t.Parallel()
+
+	client := newMockS3Client(map[string][]byte{
+		"input/dir-a/part1.bin": []byte("a1"),
+		"input/dir-a/part2.bin": []byte("a2"),
+		"input/single.txt":      []byte("single"),
+	})
+
+	backend, err := NewS3BackendFromClient(client, "bucket", "input", "in-progress", "failed")
+	if err != nil {
+		t.Fatalf("NewS3BackendFromClient() error = %v", err)
+	}
+	backend.ClaimDirs = true
+
+	claimed, err := backend.ClaimNext(context.Background())
+	if err != nil {
+		t.Fatalf("ClaimNext() error = %v", err)
+	}
+
+	if got, want := claimed.Path(), "in-progress/dir-a/"; got != want {
+		t.Fatalf("claimed.Path() = %q, want %q", got, want)
+	}
+	if !client.has("in-progress/dir-a/part1.bin") || !client.has("in-progress/dir-a/part2.bin") {
+		t.Fatalf("expected directory objects moved to in-progress")
+	}
+	if client.has("input/dir-a/part1.bin") || client.has("input/dir-a/part2.bin") {
+		t.Fatalf("expected source directory objects removed from input")
+	}
+	if !client.has("input/single.txt") {
+		t.Fatalf("expected root file to remain in input in directory-target mode")
+	}
+}
+
 func TestClaimedS3ObjectMoveToFailed_AddsUniqueSuffixOnCollision(t *testing.T) {
 	t.Parallel()
 
@@ -197,6 +231,39 @@ func TestS3BackendCompleteAndFailClaim(t *testing.T) {
 	}
 	if !client.has("failed/b.txt") {
 		t.Fatalf("expected failed/b.txt to exist")
+	}
+}
+
+func TestS3BackendCompleteAndFailClaim_DirectoryTargetMode(t *testing.T) {
+	t.Parallel()
+
+	client := newMockS3Client(map[string][]byte{
+		"in-progress/dir-a/part1.bin": []byte("a1"),
+		"in-progress/dir-b/part1.bin": []byte("b1"),
+	})
+
+	backend, err := NewS3BackendFromClient(client, "bucket", "input", "in-progress", "failed")
+	if err != nil {
+		t.Fatalf("NewS3BackendFromClient() error = %v", err)
+	}
+	backend.ClaimDirs = true
+
+	if err := backend.CompleteClaim(context.Background(), "in-progress/dir-a/"); err != nil {
+		t.Fatalf("CompleteClaim() error = %v", err)
+	}
+	if client.has("in-progress/dir-a/part1.bin") {
+		t.Fatalf("expected completed directory objects removed")
+	}
+
+	failedKey, err := backend.FailClaim(context.Background(), "in-progress/dir-b/")
+	if err != nil {
+		t.Fatalf("FailClaim() error = %v", err)
+	}
+	if got, want := failedKey, "failed/dir-b/"; got != want {
+		t.Fatalf("failed key = %q, want %q", got, want)
+	}
+	if !client.has("failed/dir-b/part1.bin") {
+		t.Fatalf("expected failed directory objects to exist")
 	}
 }
 

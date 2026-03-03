@@ -9,7 +9,7 @@ Track planned work for the `v1.1.0` release here.
 - [x] Add orchestration-oriented variants of `RunOnce` and `Run` for coordinating remote workers
   - Note: this step only pulls the file and places it in the working bucket, then stops until the next method is called
 - [x] Add task check-in methods for worker status reporting (`Completed` and `Failed`)
-- [ ] Support select-work targets as either files or directories (configured up front per check)
+- [x] Support select-work targets as either files or directories (configured up front per check)
   - Note: treat file and directory targets uniformly so projects can submit whole directories when multiple files are needed
   - Reason: binary-heavy workflows (for example audio/video + sidecar metadata files) need related files in the same directory to travel together
 - [x] Make number of claimed items per run configurable

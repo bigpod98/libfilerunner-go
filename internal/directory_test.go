@@ -226,6 +226,48 @@ func TestDirectoryBackendCompleteAndFailClaim(t *testing.T) {
 	}
 }
 
+func TestDirectoryBackendCompleteAndFailClaim_DirectoryTargetMode(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	inputDir := filepath.Join(root, "input")
+	inProgressDir := filepath.Join(root, "in-progress")
+	failedDir := filepath.Join(root, "failed")
+
+	backend, err := NewDirectoryBackend(inputDir, inProgressDir, failedDir, true)
+	if err != nil {
+		t.Fatalf("NewDirectoryBackend() error = %v", err)
+	}
+	if err := backend.EnsureDirectories(); err != nil {
+		t.Fatalf("EnsureDirectories() error = %v", err)
+	}
+
+	dirA := filepath.Join(inProgressDir, "dir-a")
+	if err := os.MkdirAll(dirA, 0o755); err != nil {
+		t.Fatalf("MkdirAll(dir-a) error = %v", err)
+	}
+	mustWriteFile(t, filepath.Join(dirA, "part1.bin"), "a1")
+	if err := backend.CompleteClaim(context.Background(), dirA); err != nil {
+		t.Fatalf("CompleteClaim() error = %v", err)
+	}
+	if _, err := os.Stat(dirA); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected completed directory removed, stat err = %v", err)
+	}
+
+	dirB := filepath.Join(inProgressDir, "dir-b")
+	if err := os.MkdirAll(dirB, 0o755); err != nil {
+		t.Fatalf("MkdirAll(dir-b) error = %v", err)
+	}
+	mustWriteFile(t, filepath.Join(dirB, "part1.bin"), "b1")
+	failedPath, err := backend.FailClaim(context.Background(), dirB)
+	if err != nil {
+		t.Fatalf("FailClaim() error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(failedPath, "part1.bin")); err != nil {
+		t.Fatalf("expected failed directory contents to exist, stat err = %v", err)
+	}
+}
+
 func mustWriteFile(t *testing.T, path, contents string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
