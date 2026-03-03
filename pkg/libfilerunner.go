@@ -16,7 +16,8 @@ type DirectoryConfig struct {
 	InProgressDir string
 	FailedDir     string
 	BatchSize     int
-	SelectTarget  SelectTarget
+	// SelectTarget chooses whether each claim is a single file or a directory unit.
+	SelectTarget SelectTarget
 }
 
 // S3Config configures the V1 S3 queue flow.
@@ -27,7 +28,8 @@ type S3Config struct {
 	InProgressPrefix string
 	FailedPrefix     string
 	BatchSize        int
-	SelectTarget     SelectTarget
+	// SelectTarget chooses whether each claim is a single object or a directory-like prefix unit.
+	SelectTarget SelectTarget
 }
 
 // AzureBlobConfig configures the V1 Azure Blob queue flow.
@@ -38,13 +40,17 @@ type AzureBlobConfig struct {
 	InProgressPrefix string
 	FailedPrefix     string
 	BatchSize        int
-	SelectTarget     SelectTarget
+	// SelectTarget chooses whether each claim is a single blob or a directory-like prefix unit.
+	SelectTarget SelectTarget
 }
 
+// SelectTarget controls what each claim unit represents.
 type SelectTarget string
 
 const (
-	SelectTargetFiles       SelectTarget = "files"
+	// SelectTargetFiles claims one file/object/blob per unit of work.
+	SelectTargetFiles SelectTarget = "files"
+	// SelectTargetDirectories claims one directory/prefix per unit of work.
 	SelectTargetDirectories SelectTarget = "directories"
 )
 
@@ -349,7 +355,7 @@ func runOnceWithHandler(ctx context.Context, handler Handler, failedTarget strin
 		result.HandlerErr = handlerErr
 		failedPath, moveErr := claimed.MoveToFailed(ctx, failedTarget)
 		if moveErr != nil {
-			return result, fmt.Errorf("handler failed: %w; additionally failed to move file to failed target: %v", handlerErr, moveErr)
+			return result, fmt.Errorf("handler failed: %w; additionally failed to move claimed item to failed target: %v", handlerErr, moveErr)
 		}
 		result.FailedPath = failedPath
 		return result, handlerErr
