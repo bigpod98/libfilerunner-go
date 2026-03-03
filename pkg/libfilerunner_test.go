@@ -133,6 +133,25 @@ func TestDirectoryRunnerRunOnce_NoFileReturnsEmptyResult(t *testing.T) {
 	}
 }
 
+func TestDirectoryRunnerRunOnceOrchestration_ClaimCanceled(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	dirs := queueDirs(root)
+	runner := mustNewRunner(t, dirs)
+	if err := runner.EnsureDirectories(); err != nil {
+		t.Fatalf("EnsureDirectories() error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := runner.RunOnceOrchestration(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("RunOnceOrchestration() error = %v, want %v", err, context.Canceled)
+	}
+}
+
 func TestDirectoryRunnerRunOnceOrchestration_ClaimsWithoutFinalizing(t *testing.T) {
 	t.Parallel()
 
@@ -363,6 +382,62 @@ func TestDirectoryRunnerFailed_MovesClaimedInProgressFile(t *testing.T) {
 	assertNotExists(t, claimed.InProgress)
 	if _, statErr := os.Stat(failedPath); statErr != nil {
 		t.Fatalf("expected failed file to exist at %q, stat err = %v", failedPath, statErr)
+	}
+}
+
+func TestDirectoryRunnerFailed_FinalizeCanceled(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	dirs := queueDirs(root)
+	runner := mustNewRunner(t, dirs)
+	if err := runner.EnsureDirectories(); err != nil {
+		t.Fatalf("EnsureDirectories() error = %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(dirs.input, "job.txt"), []byte("hello"), 0o644); err != nil {
+		t.Fatalf("WriteFile(input) error = %v", err)
+	}
+
+	claimed, err := runner.RunOnceOrchestration(context.Background())
+	if err != nil {
+		t.Fatalf("RunOnceOrchestration() error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = runner.Failed(ctx, claimed.InProgress)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Failed() error = %v, want %v", err, context.Canceled)
+	}
+}
+
+func TestDirectoryRunnerRunOnce_HandlerFailureAndFinalizeFailureReturnsCombinedError(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	dirs := queueDirs(root)
+	runner := mustNewRunner(t, dirs)
+	if err := runner.EnsureDirectories(); err != nil {
+		t.Fatalf("EnsureDirectories() error = %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(dirs.input, "job.txt"), []byte("hello"), 0o644); err != nil {
+		t.Fatalf("WriteFile(input) error = %v", err)
+	}
+
+	handlerErr := errors.New("process failed")
+	_, err := runner.RunOnce(context.Background(), func(ctx context.Context, job libfilerunner.FileJob) error {
+		if removeErr := os.Remove(job.Path); removeErr != nil {
+			t.Fatalf("Remove(job.Path) error = %v", removeErr)
+		}
+		return handlerErr
+	})
+	if err == nil {
+		t.Fatalf("RunOnce() error = nil, want combined handler/finalize error")
+	}
+	if !errors.Is(err, handlerErr) {
+		t.Fatalf("RunOnce() error = %v, want to wrap %v", err, handlerErr)
 	}
 }
 

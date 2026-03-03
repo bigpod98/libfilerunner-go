@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -115,6 +116,51 @@ func TestDirectoryBackendClaimNext_DirectoryTargetModeClaimsDirectories(t *testi
 	}
 	if _, err := os.Stat(filepath.Join(inputDir, "single.txt")); err != nil {
 		t.Fatalf("expected input/single.txt to remain, stat err = %v", err)
+	}
+}
+
+func TestDirectoryBackendClaimNext_ConcurrentClaimersSingleWinner(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	inputDir := filepath.Join(root, "input")
+	inProgressDir := filepath.Join(root, "in-progress")
+	failedDir := filepath.Join(root, "failed")
+
+	backend, err := NewDirectoryBackend(inputDir, inProgressDir, failedDir, false)
+	if err != nil {
+		t.Fatalf("NewDirectoryBackend() error = %v", err)
+	}
+	if err := backend.EnsureDirectories(); err != nil {
+		t.Fatalf("EnsureDirectories() error = %v", err)
+	}
+	mustWriteFile(t, filepath.Join(inputDir, "job.txt"), "payload")
+
+	var wg sync.WaitGroup
+	results := make([]error, 2)
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			_, results[idx] = backend.ClaimNext(context.Background())
+		}(i)
+	}
+	wg.Wait()
+
+	successes := 0
+	noFile := 0
+	for _, err := range results {
+		switch {
+		case err == nil:
+			successes++
+		case errors.Is(err, ErrNoFileAvailable):
+			noFile++
+		default:
+			t.Fatalf("unexpected claim error = %v", err)
+		}
+	}
+	if successes != 1 || noFile != 1 {
+		t.Fatalf("claim outcomes success=%d no-file=%d, want 1 and 1", successes, noFile)
 	}
 }
 

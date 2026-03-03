@@ -100,6 +100,46 @@ func TestAzureBlobBackendClaimNext_DirectoryTargetModeClaimsDirectoryPrefix(t *t
 	}
 }
 
+func TestAzureBlobBackendClaimNext_ConcurrentClaimersSingleWinner(t *testing.T) {
+	t.Parallel()
+
+	client := newMockAzureBlobClient(map[string][]byte{
+		"input/job.txt": []byte("payload"),
+	})
+
+	backend, err := NewAzureBlobBackendFromClient(client, "container", "input", "in-progress", "failed")
+	if err != nil {
+		t.Fatalf("NewAzureBlobBackendFromClient() error = %v", err)
+	}
+
+	var wg sync.WaitGroup
+	results := make([]error, 2)
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			_, results[idx] = backend.ClaimNext(context.Background())
+		}(i)
+	}
+	wg.Wait()
+
+	successes := 0
+	noFile := 0
+	for _, err := range results {
+		switch {
+		case err == nil:
+			successes++
+		case errors.Is(err, ErrNoFileAvailable):
+			noFile++
+		default:
+			t.Fatalf("unexpected claim error = %v", err)
+		}
+	}
+	if successes != 1 || noFile != 1 {
+		t.Fatalf("claim outcomes success=%d no-file=%d, want 1 and 1", successes, noFile)
+	}
+}
+
 func TestClaimedAzureBlobMoveToFailed_AddsUniqueSuffixOnCollision(t *testing.T) {
 	t.Parallel()
 
@@ -291,13 +331,18 @@ func (m *mockAzureBlobClient) ListBlobNames(_ context.Context, prefix string) ([
 	return keys, nil
 }
 
-func (m *mockAzureBlobClient) CopyBlob(_ context.Context, srcKey, dstKey string) error {
+func (m *mockAzureBlobClient) CopyBlob(_ context.Context, srcKey, dstKey string, destinationMustNotExist bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	b, ok := m.objects[srcKey]
 	if !ok {
 		return &azcore.ResponseError{StatusCode: 404, ErrorCode: "BlobNotFound"}
+	}
+	if destinationMustNotExist {
+		if _, exists := m.objects[dstKey]; exists {
+			return &azcore.ResponseError{StatusCode: 412, ErrorCode: "ConditionNotMet"}
+		}
 	}
 	m.objects[dstKey] = append([]byte(nil), b...)
 	return nil

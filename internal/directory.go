@@ -6,7 +6,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 )
 
@@ -71,10 +70,6 @@ func (b *DirectoryBackend) ClaimNext(ctx context.Context) (*ClaimedFile, error) 
 	if err != nil {
 		return nil, err
 	}
-
-	sort.Slice(entries, func(i, j int) bool {
-		return entries[i].Name() < entries[j].Name()
-	})
 
 	for _, entry := range entries {
 		if err := ctx.Err(); err != nil {

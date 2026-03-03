@@ -42,6 +42,11 @@ type ClaimedS3Object struct {
 	client s3API
 }
 
+type listedS3Object struct {
+	key  string
+	etag string
+}
+
 func NewS3Backend(region, bucket, inputPrefix, inProgressPrefix, failedPrefix string) (*S3Backend, error) {
 	if strings.TrimSpace(bucket) == "" {
 		return nil, errors.New("bucket is required")
@@ -111,40 +116,41 @@ func (b *S3Backend) ClaimNext(ctx context.Context) (*ClaimedS3Object, error) {
 		return nil, err
 	}
 
-	keys, err := b.listInputKeys(ctx)
+	objects, err := b.listInputObjects(ctx)
 	if err != nil {
 		return nil, err
 	}
 
 	if b.ClaimDirs {
-		return b.claimNextDirectory(ctx, keys)
+		return b.claimNextDirectory(ctx, objects)
 	}
 
-	for _, srcKey := range keys {
+	for _, srcObj := range objects {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
+		srcKey := srcObj.key
 
 		suffix := strings.TrimPrefix(srcKey, b.InputPrefix)
 		if suffix == "" {
 			continue
 		}
 
-		dstBase := b.InProgressPrefix + suffix
-		dstKey, err := b.uniqueDestinationKey(ctx, dstBase)
-		if err != nil {
-			return nil, err
-		}
+		dstKey := b.InProgressPrefix + suffix
 
-		if err := b.copyObject(ctx, srcKey, dstKey); err != nil {
-			if isNotFoundError(err) {
+		if err := b.copyObject(ctx, srcKey, dstKey, srcObj.etag, true); err != nil {
+			if isNotFoundError(err) || isPreconditionFailedError(err) {
 				// Source vanished between listing and claim; try the next one.
 				continue
 			}
 			return nil, err
 		}
 
-		if err := b.deleteObject(ctx, srcKey); err != nil {
+		if err := b.deleteObject(ctx, srcKey, srcObj.etag); err != nil {
+			_ = b.deleteObject(ctx, dstKey, "")
+			if isNotFoundError(err) || isPreconditionFailedError(err) {
+				continue
+			}
 			return nil, err
 		}
 
@@ -159,18 +165,15 @@ func (b *S3Backend) ClaimNext(ctx context.Context) (*ClaimedS3Object, error) {
 	return nil, ErrNoFileAvailable
 }
 
-func (b *S3Backend) claimNextDirectory(ctx context.Context, keys []string) (*ClaimedS3Object, error) {
-	dirSuffixes := firstLevelDirectorySuffixes(keys, b.InputPrefix)
+func (b *S3Backend) claimNextDirectory(ctx context.Context, objects []listedS3Object) (*ClaimedS3Object, error) {
+	dirSuffixes := s3FirstLevelDirectorySuffixes(objects, b.InputPrefix)
 	for _, dirSuffix := range dirSuffixes {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 
 		srcPrefix := b.InputPrefix + dirSuffix
-		dstPrefix, err := b.uniqueDestinationPrefix(ctx, b.InProgressPrefix+dirSuffix)
-		if err != nil {
-			return nil, err
-		}
+		dstPrefix := b.InProgressPrefix + dirSuffix
 
 		claimedAny, err := b.copyThenDeletePrefix(ctx, srcPrefix, dstPrefix)
 		if err != nil {
@@ -206,7 +209,7 @@ func (b *S3Backend) CompleteClaim(ctx context.Context, inProgressKey string) err
 	if b.ClaimDirs {
 		return b.deleteAllWithPrefix(ctx, ensureTrailingSlash(inProgressKey))
 	}
-	return b.deleteObject(ctx, inProgressKey)
+	return b.deleteObject(ctx, inProgressKey, "")
 }
 
 func (b *S3Backend) FailClaim(ctx context.Context, inProgressKey string) (string, error) {
@@ -313,10 +316,10 @@ func (o *ClaimedS3Object) MoveToFailed(ctx context.Context, failedPrefix string)
 		return "", err
 	}
 
-	if err := b.copyObject(ctx, o.key, dstKey); err != nil {
+	if err := b.copyObject(ctx, o.key, dstKey, "", false); err != nil {
 		return "", err
 	}
-	if err := b.deleteObject(ctx, o.key); err != nil {
+	if err := b.deleteObject(ctx, o.key, ""); err != nil {
 		return "", err
 	}
 
@@ -326,11 +329,23 @@ func (o *ClaimedS3Object) MoveToFailed(ctx context.Context, failedPrefix string)
 }
 
 func (b *S3Backend) listInputKeys(ctx context.Context) ([]string, error) {
-	return b.listKeysWithPrefix(ctx, b.InputPrefix)
+	objects, err := b.listInputObjects(ctx)
+	if err != nil {
+		return nil, err
+	}
+	keys := make([]string, 0, len(objects))
+	for _, obj := range objects {
+		keys = append(keys, obj.key)
+	}
+	return keys, nil
 }
 
-func (b *S3Backend) listKeysWithPrefix(ctx context.Context, prefix string) ([]string, error) {
-	keys := make([]string, 0)
+func (b *S3Backend) listInputObjects(ctx context.Context) ([]listedS3Object, error) {
+	return b.listObjectsWithPrefix(ctx, b.InputPrefix)
+}
+
+func (b *S3Backend) listObjectsWithPrefix(ctx context.Context, prefix string) ([]listedS3Object, error) {
+	objects := make([]listedS3Object, 0)
 	var token *string
 
 	for {
@@ -347,15 +362,19 @@ func (b *S3Backend) listKeysWithPrefix(ctx context.Context, prefix string) ([]st
 			return nil, err
 		}
 
-		for _, obj := range out.Contents {
-			if obj.Key == nil {
+		for _, listed := range out.Contents {
+			if listed.Key == nil {
 				continue
 			}
-			key := *obj.Key
+			key := *listed.Key
 			if key == prefix || strings.HasSuffix(key, "/") {
 				continue
 			}
-			keys = append(keys, key)
+			etag := ""
+			if listed.ETag != nil {
+				etag = *listed.ETag
+			}
+			objects = append(objects, listedS3Object{key: key, etag: etag})
 		}
 
 		if !aws.ToBool(out.IsTruncated) {
@@ -364,32 +383,41 @@ func (b *S3Backend) listKeysWithPrefix(ctx context.Context, prefix string) ([]st
 		token = out.NextContinuationToken
 	}
 
-	sort.Strings(keys)
-	return keys, nil
+	return objects, nil
 }
 
 func (b *S3Backend) copyThenDeletePrefix(ctx context.Context, srcPrefix, dstPrefix string) (bool, error) {
-	keys, err := b.listKeysWithPrefix(ctx, srcPrefix)
+	objects, err := b.listObjectsWithPrefix(ctx, srcPrefix)
 	if err != nil {
 		return false, err
 	}
-	if len(keys) == 0 {
+	if len(objects) == 0 {
 		return false, nil
 	}
 
-	for _, srcKey := range keys {
+	copied := make([]string, 0, len(objects))
+
+	for _, srcObj := range objects {
 		if err := ctx.Err(); err != nil {
+			b.deleteCopiedObjectsBestEffort(ctx, copied)
 			return false, err
 		}
+		srcKey := srcObj.key
 		rel := strings.TrimPrefix(srcKey, srcPrefix)
 		dstKey := dstPrefix + rel
-		if err := b.copyObject(ctx, srcKey, dstKey); err != nil {
-			if isNotFoundError(err) {
+		if err := b.copyObject(ctx, srcKey, dstKey, srcObj.etag, true); err != nil {
+			b.deleteCopiedObjectsBestEffort(ctx, copied)
+			if isNotFoundError(err) || isPreconditionFailedError(err) {
 				return false, nil
 			}
 			return false, err
 		}
-		if err := b.deleteObject(ctx, srcKey); err != nil {
+		copied = append(copied, dstKey)
+		if err := b.deleteObject(ctx, srcKey, srcObj.etag); err != nil {
+			b.deleteCopiedObjectsBestEffort(ctx, copied)
+			if isNotFoundError(err) || isPreconditionFailedError(err) {
+				return false, nil
+			}
 			return false, err
 		}
 	}
@@ -398,15 +426,15 @@ func (b *S3Backend) copyThenDeletePrefix(ctx context.Context, srcPrefix, dstPref
 }
 
 func (b *S3Backend) deleteAllWithPrefix(ctx context.Context, prefix string) error {
-	keys, err := b.listKeysWithPrefix(ctx, prefix)
+	objects, err := b.listObjectsWithPrefix(ctx, prefix)
 	if err != nil {
 		return err
 	}
-	for _, key := range keys {
+	for _, obj := range objects {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := b.deleteObject(ctx, key); err != nil {
+		if err := b.deleteObject(ctx, obj.key, ""); err != nil {
 			return err
 		}
 	}
@@ -438,17 +466,18 @@ func (b *S3Backend) uniqueDestinationPrefix(ctx context.Context, basePrefix stri
 }
 
 func (b *S3Backend) prefixExists(ctx context.Context, prefix string) (bool, error) {
-	keys, err := b.listKeysWithPrefix(ctx, prefix)
+	objects, err := b.listObjectsWithPrefix(ctx, prefix)
 	if err != nil {
 		return false, err
 	}
-	return len(keys) > 0, nil
+	return len(objects) > 0, nil
 }
 
-func firstLevelDirectorySuffixes(keys []string, inputPrefix string) []string {
+func s3FirstLevelDirectorySuffixes(objects []listedS3Object, inputPrefix string) []string {
 	seen := make(map[string]struct{})
 	dirs := make([]string, 0)
-	for _, key := range keys {
+	for _, obj := range objects {
+		key := obj.key
 		suffix := strings.TrimPrefix(key, inputPrefix)
 		idx := strings.Index(suffix, "/")
 		if idx <= 0 {
@@ -470,6 +499,12 @@ func ensureTrailingSlash(key string) string {
 		return key
 	}
 	return key + "/"
+}
+
+func (b *S3Backend) deleteCopiedObjectsBestEffort(ctx context.Context, keys []string) {
+	for _, key := range keys {
+		_ = b.deleteObject(ctx, key, "")
+	}
 }
 
 func (b *S3Backend) uniqueDestinationKey(ctx context.Context, baseKey string) (string, error) {
@@ -511,21 +546,32 @@ func (b *S3Backend) objectExists(ctx context.Context, key string) (bool, error) 
 	return false, err
 }
 
-func (b *S3Backend) copyObject(ctx context.Context, srcKey, dstKey string) error {
+func (b *S3Backend) copyObject(ctx context.Context, srcKey, dstKey, srcETag string, destinationMustNotExist bool) error {
 	copySource := b.Bucket + "/" + srcKey
-	_, err := b.client.CopyObject(ctx, &s3.CopyObjectInput{
+	in := &s3.CopyObjectInput{
 		Bucket:     aws.String(b.Bucket),
 		CopySource: aws.String(copySource),
 		Key:        aws.String(dstKey),
-	})
+	}
+	if srcETag != "" {
+		in.CopySourceIfMatch = aws.String(srcETag)
+	}
+	if destinationMustNotExist {
+		in.IfNoneMatch = aws.String("*")
+	}
+	_, err := b.client.CopyObject(ctx, in)
 	return err
 }
 
-func (b *S3Backend) deleteObject(ctx context.Context, key string) error {
-	_, err := b.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+func (b *S3Backend) deleteObject(ctx context.Context, key, ifMatchETag string) error {
+	in := &s3.DeleteObjectInput{
 		Bucket: aws.String(b.Bucket),
 		Key:    aws.String(key),
-	})
+	}
+	if ifMatchETag != "" {
+		in.IfMatch = aws.String(ifMatchETag)
+	}
+	_, err := b.client.DeleteObject(ctx, in)
 	return err
 }
 
@@ -548,6 +594,20 @@ func isNotFoundError(err error) bool {
 	if errors.As(err, &apiErr) {
 		code := apiErr.ErrorCode()
 		return code == "NotFound" || code == "NoSuchKey" || code == "NoSuchBucket"
+	}
+
+	return false
+}
+
+func isPreconditionFailedError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) {
+		code := apiErr.ErrorCode()
+		return code == "PreconditionFailed" || code == "ConditionalRequestConflict"
 	}
 
 	return false

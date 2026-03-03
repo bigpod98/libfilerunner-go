@@ -3,6 +3,8 @@ package internal
 import (
 	"bytes"
 	"context"
+	"crypto/md5"
+	"encoding/hex"
 	"errors"
 	"io"
 	"sort"
@@ -100,6 +102,46 @@ func TestS3BackendClaimNext_DirectoryTargetModeClaimsDirectoryPrefix(t *testing.
 	}
 	if !client.has("input/single.txt") {
 		t.Fatalf("expected root file to remain in input in directory-target mode")
+	}
+}
+
+func TestS3BackendClaimNext_ConcurrentClaimersSingleWinner(t *testing.T) {
+	t.Parallel()
+
+	client := newMockS3Client(map[string][]byte{
+		"input/job.txt": []byte("payload"),
+	})
+
+	backend, err := NewS3BackendFromClient(client, "bucket", "input", "in-progress", "failed")
+	if err != nil {
+		t.Fatalf("NewS3BackendFromClient() error = %v", err)
+	}
+
+	var wg sync.WaitGroup
+	results := make([]error, 2)
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			_, results[idx] = backend.ClaimNext(context.Background())
+		}(i)
+	}
+	wg.Wait()
+
+	successes := 0
+	noFile := 0
+	for _, err := range results {
+		switch {
+		case err == nil:
+			successes++
+		case errors.Is(err, ErrNoFileAvailable):
+			noFile++
+		default:
+			t.Fatalf("unexpected claim error = %v", err)
+		}
+	}
+	if successes != 1 || noFile != 1 {
+		t.Fatalf("claim outcomes success=%d no-file=%d, want 1 and 1", successes, noFile)
 	}
 }
 
@@ -296,7 +338,8 @@ func (m *mockS3Client) ListObjectsV2(_ context.Context, params *s3.ListObjectsV2
 	contents := make([]s3types.Object, 0, len(keys))
 	for _, key := range keys {
 		k := key
-		contents = append(contents, s3types.Object{Key: &k})
+		etag := m.etagForLocked(key)
+		contents = append(contents, s3types.Object{Key: &k, ETag: &etag})
 	}
 
 	out := &s3.ListObjectsV2Output{Contents: make([]s3types.Object, 0, len(contents))}
@@ -320,8 +363,18 @@ func (m *mockS3Client) CopyObject(_ context.Context, params *s3.CopyObjectInput,
 	if !ok {
 		return nil, mockAPIError{code: "NoSuchKey", message: "source not found"}
 	}
+	if params.CopySourceIfMatch != nil {
+		if got, want := m.etagForLocked(srcKey), aws.ToString(params.CopySourceIfMatch); got != want {
+			return nil, mockAPIError{code: "PreconditionFailed", message: "source etag mismatch"}
+		}
+	}
 
 	dst := aws.ToString(params.Key)
+	if params.IfNoneMatch != nil && aws.ToString(params.IfNoneMatch) == "*" {
+		if _, exists := m.objects[dst]; exists {
+			return nil, mockAPIError{code: "PreconditionFailed", message: "destination already exists"}
+		}
+	}
 	m.objects[dst] = append([]byte(nil), b...)
 	return &s3.CopyObjectOutput{}, nil
 }
@@ -330,7 +383,16 @@ func (m *mockS3Client) DeleteObject(_ context.Context, params *s3.DeleteObjectIn
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	delete(m.objects, aws.ToString(params.Key))
+	key := aws.ToString(params.Key)
+	if params.IfMatch != nil {
+		if _, exists := m.objects[key]; !exists {
+			return nil, mockAPIError{code: "NoSuchKey", message: "object not found"}
+		}
+		if got, want := m.etagForLocked(key), aws.ToString(params.IfMatch); got != want {
+			return nil, mockAPIError{code: "PreconditionFailed", message: "etag mismatch"}
+		}
+	}
+	delete(m.objects, key)
 	return &s3.DeleteObjectOutput{}, nil
 }
 
@@ -360,6 +422,12 @@ func (m *mockS3Client) has(key string) bool {
 	defer m.mu.Unlock()
 	_, ok := m.objects[key]
 	return ok
+}
+
+func (m *mockS3Client) etagForLocked(key string) string {
+	b := m.objects[key]
+	sum := md5.Sum(b)
+	return "\"" + hex.EncodeToString(sum[:]) + "\""
 }
 
 type mockAPIError struct {

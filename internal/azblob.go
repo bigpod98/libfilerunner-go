@@ -6,17 +6,17 @@ import (
 	"io"
 	"net/http"
 	"path"
-	"sort"
 	"strings"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blob"
 )
 
 type azureBlobAPI interface {
 	ListBlobNames(ctx context.Context, prefix string) ([]string, error)
-	CopyBlob(ctx context.Context, srcKey, dstKey string) error
+	CopyBlob(ctx context.Context, srcKey, dstKey string, destinationMustNotExist bool) error
 	DeleteBlob(ctx context.Context, key string) error
 	BlobExists(ctx context.Context, key string) (bool, error)
 	OpenBlob(ctx context.Context, key string) (io.ReadCloser, error)
@@ -52,10 +52,18 @@ func (c *azureBlobClient) ListBlobNames(ctx context.Context, prefix string) ([]s
 	return keys, nil
 }
 
-func (c *azureBlobClient) CopyBlob(ctx context.Context, srcKey, dstKey string) error {
+func (c *azureBlobClient) CopyBlob(ctx context.Context, srcKey, dstKey string, destinationMustNotExist bool) error {
 	containerClient := c.client.ServiceClient().NewContainerClient(c.container)
 	srcURL := containerClient.NewBlobClient(srcKey).URL()
-	_, err := containerClient.NewBlobClient(dstKey).CopyFromURL(ctx, srcURL, nil)
+	var options *blob.CopyFromURLOptions
+	if destinationMustNotExist {
+		options = &blob.CopyFromURLOptions{
+			BlobAccessConditions: &blob.AccessConditions{
+				ModifiedAccessConditions: &blob.ModifiedAccessConditions{IfNoneMatch: toAzureETagPtr("*")},
+			},
+		}
+	}
+	_, err := containerClient.NewBlobClient(dstKey).CopyFromURL(ctx, srcURL, options)
 	return err
 }
 
@@ -195,14 +203,10 @@ func (b *AzureBlobBackend) ClaimNext(ctx context.Context) (*ClaimedAzureBlob, er
 			continue
 		}
 
-		dstBase := b.InProgressPrefix + suffix
-		dstKey, err := b.uniqueDestinationKey(ctx, dstBase)
-		if err != nil {
-			return nil, err
-		}
+		dstKey := b.InProgressPrefix + suffix
 
-		if err := b.copyBlob(ctx, srcKey, dstKey); err != nil {
-			if isAzureNotFoundError(err) {
+		if err := b.copyBlob(ctx, srcKey, dstKey, true); err != nil {
+			if isAzureNotFoundError(err) || isAzurePreconditionFailedError(err) {
 				// Source vanished between listing and claim; try the next one.
 				continue
 			}
@@ -210,6 +214,10 @@ func (b *AzureBlobBackend) ClaimNext(ctx context.Context) (*ClaimedAzureBlob, er
 		}
 
 		if err := b.deleteBlob(ctx, srcKey); err != nil {
+			_ = b.deleteBlob(ctx, dstKey)
+			if isAzureNotFoundError(err) {
+				continue
+			}
 			return nil, err
 		}
 
@@ -225,17 +233,14 @@ func (b *AzureBlobBackend) ClaimNext(ctx context.Context) (*ClaimedAzureBlob, er
 }
 
 func (b *AzureBlobBackend) claimNextDirectory(ctx context.Context, keys []string) (*ClaimedAzureBlob, error) {
-	dirSuffixes := firstLevelDirectorySuffixes(keys, b.InputPrefix)
+	dirSuffixes := firstLevelDirectorySuffixesFromKeys(keys, b.InputPrefix)
 	for _, dirSuffix := range dirSuffixes {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 
 		srcPrefix := b.InputPrefix + dirSuffix
-		dstPrefix, err := b.uniqueDestinationPrefix(ctx, b.InProgressPrefix+dirSuffix)
-		if err != nil {
-			return nil, err
-		}
+		dstPrefix := b.InProgressPrefix + dirSuffix
 
 		claimedAny, err := b.copyThenDeletePrefix(ctx, srcPrefix, dstPrefix)
 		if err != nil {
@@ -367,7 +372,7 @@ func (o *ClaimedAzureBlob) MoveToFailed(ctx context.Context, failedPrefix string
 		return "", err
 	}
 
-	if err := b.copyBlob(ctx, o.key, dstKey); err != nil {
+	if err := b.copyBlob(ctx, o.key, dstKey, false); err != nil {
 		return "", err
 	}
 	if err := b.deleteBlob(ctx, o.key); err != nil {
@@ -397,7 +402,6 @@ func (b *AzureBlobBackend) listKeysWithPrefix(ctx context.Context, prefix string
 		filtered = append(filtered, key)
 	}
 
-	sort.Strings(filtered)
 	return filtered, nil
 }
 
@@ -410,19 +414,25 @@ func (b *AzureBlobBackend) copyThenDeletePrefix(ctx context.Context, srcPrefix, 
 		return false, nil
 	}
 
+	copied := make([]string, 0, len(keys))
+
 	for _, srcKey := range keys {
 		if err := ctx.Err(); err != nil {
+			b.deleteCopiedBlobsBestEffort(ctx, copied)
 			return false, err
 		}
 		rel := strings.TrimPrefix(srcKey, srcPrefix)
 		dstKey := dstPrefix + rel
-		if err := b.copyBlob(ctx, srcKey, dstKey); err != nil {
-			if isAzureNotFoundError(err) {
+		if err := b.copyBlob(ctx, srcKey, dstKey, true); err != nil {
+			b.deleteCopiedBlobsBestEffort(ctx, copied)
+			if isAzureNotFoundError(err) || isAzurePreconditionFailedError(err) {
 				return false, nil
 			}
 			return false, err
 		}
+		copied = append(copied, dstKey)
 		if err := b.deleteBlob(ctx, srcKey); err != nil {
+			b.deleteCopiedBlobsBestEffort(ctx, copied)
 			return false, err
 		}
 	}
@@ -507,8 +517,8 @@ func (b *AzureBlobBackend) objectExists(ctx context.Context, key string) (bool, 
 	return b.client.BlobExists(ctx, key)
 }
 
-func (b *AzureBlobBackend) copyBlob(ctx context.Context, srcKey, dstKey string) error {
-	return b.client.CopyBlob(ctx, srcKey, dstKey)
+func (b *AzureBlobBackend) copyBlob(ctx context.Context, srcKey, dstKey string, destinationMustNotExist bool) error {
+	return b.client.CopyBlob(ctx, srcKey, dstKey, destinationMustNotExist)
 }
 
 func (b *AzureBlobBackend) deleteBlob(ctx context.Context, key string) error {
@@ -526,4 +536,47 @@ func isAzureNotFoundError(err error) bool {
 	}
 
 	return false
+}
+
+func isAzurePreconditionFailedError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	var respErr *azcore.ResponseError
+	if errors.As(err, &respErr) {
+		return respErr.StatusCode == http.StatusPreconditionFailed || respErr.StatusCode == http.StatusConflict
+	}
+
+	return false
+}
+
+func toAzureETagPtr(v string) *azcore.ETag {
+	etag := azcore.ETag(v)
+	return &etag
+}
+
+func firstLevelDirectorySuffixesFromKeys(keys []string, inputPrefix string) []string {
+	seen := make(map[string]struct{})
+	dirs := make([]string, 0)
+	for _, key := range keys {
+		suffix := strings.TrimPrefix(key, inputPrefix)
+		idx := strings.Index(suffix, "/")
+		if idx <= 0 {
+			continue
+		}
+		dir := suffix[:idx+1]
+		if _, ok := seen[dir]; ok {
+			continue
+		}
+		seen[dir] = struct{}{}
+		dirs = append(dirs, dir)
+	}
+	return dirs
+}
+
+func (b *AzureBlobBackend) deleteCopiedBlobsBestEffort(ctx context.Context, keys []string) {
+	for _, key := range keys {
+		_ = b.deleteBlob(ctx, key)
+	}
 }
