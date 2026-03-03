@@ -262,6 +262,188 @@ func TestDirectoryRunnerRun_ProcessesUntilQueueEmpty(t *testing.T) {
 	assertNotExists(t, filepath.Join(dirs.failed, "b.txt"))
 }
 
+func TestDirectoryRunnerRun_RespectsConfiguredBatchSize(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	dirs := queueDirs(root)
+	runner := mustNewRunnerWithBatch(t, dirs, 1)
+	if err := runner.EnsureDirectories(); err != nil {
+		t.Fatalf("EnsureDirectories() error = %v", err)
+	}
+
+	for _, name := range []string{"a.txt", "b.txt"} {
+		if err := os.WriteFile(filepath.Join(dirs.input, name), []byte(name), 0o644); err != nil {
+			t.Fatalf("WriteFile(%q) error = %v", name, err)
+		}
+	}
+
+	handlerCalls := 0
+	runRes, err := runner.Run(context.Background(), func(ctx context.Context, job libfilerunner.FileJob) error {
+		handlerCalls++
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	if handlerCalls != 1 {
+		t.Fatalf("handlerCalls = %d, want 1", handlerCalls)
+	}
+	if runRes.FoundCount != 1 || runRes.ProcessedCount != 1 {
+		t.Fatalf("runRes = %+v, want FoundCount=1 ProcessedCount=1", runRes)
+	}
+
+	inputEntries, err := os.ReadDir(dirs.input)
+	if err != nil {
+		t.Fatalf("ReadDir(input) error = %v", err)
+	}
+	if len(inputEntries) != 1 {
+		t.Fatalf("remaining input entry count = %d, want 1", len(inputEntries))
+	}
+}
+
+func TestDirectoryRunnerCompleted_RemovesClaimedInProgressFile(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	dirs := queueDirs(root)
+	runner := mustNewRunner(t, dirs)
+	if err := runner.EnsureDirectories(); err != nil {
+		t.Fatalf("EnsureDirectories() error = %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(dirs.input, "job.txt"), []byte("hello"), 0o644); err != nil {
+		t.Fatalf("WriteFile(input) error = %v", err)
+	}
+
+	claimed, err := runner.RunOnceOrchestration(context.Background())
+	if err != nil {
+		t.Fatalf("RunOnceOrchestration() error = %v", err)
+	}
+	if !claimed.Found {
+		t.Fatalf("claimed result = %+v, want Found=true", claimed)
+	}
+
+	if err := runner.Completed(context.Background(), claimed.InProgress); err != nil {
+		t.Fatalf("Completed() error = %v", err)
+	}
+
+	assertNotExists(t, claimed.InProgress)
+	assertNotExists(t, filepath.Join(dirs.failed, "job.txt"))
+}
+
+func TestDirectoryRunnerFailed_MovesClaimedInProgressFile(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	dirs := queueDirs(root)
+	runner := mustNewRunner(t, dirs)
+	if err := runner.EnsureDirectories(); err != nil {
+		t.Fatalf("EnsureDirectories() error = %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(dirs.input, "job.txt"), []byte("hello"), 0o644); err != nil {
+		t.Fatalf("WriteFile(input) error = %v", err)
+	}
+
+	claimed, err := runner.RunOnceOrchestration(context.Background())
+	if err != nil {
+		t.Fatalf("RunOnceOrchestration() error = %v", err)
+	}
+
+	failedPath, err := runner.Failed(context.Background(), claimed.InProgress)
+	if err != nil {
+		t.Fatalf("Failed() error = %v", err)
+	}
+	if failedPath == "" {
+		t.Fatalf("Failed() path is empty, want failed path")
+	}
+
+	assertNotExists(t, claimed.InProgress)
+	if _, statErr := os.Stat(failedPath); statErr != nil {
+		t.Fatalf("expected failed file to exist at %q, stat err = %v", failedPath, statErr)
+	}
+}
+
+func TestDirectoryRunnerRunOnceOrchestration_DirectoryTargetModeClaimsDirectory(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	dirs := queueDirs(root)
+	runner, err := libfilerunner.NewDirectoryRunner(libfilerunner.DirectoryConfig{
+		InputDir:      dirs.input,
+		InProgressDir: dirs.inProgress,
+		FailedDir:     dirs.failed,
+		SelectTarget:  libfilerunner.SelectTargetDirectories,
+	})
+	if err != nil {
+		t.Fatalf("NewDirectoryRunner() error = %v", err)
+	}
+	if err := runner.EnsureDirectories(); err != nil {
+		t.Fatalf("EnsureDirectories() error = %v", err)
+	}
+
+	if err := os.Mkdir(filepath.Join(dirs.input, "job-dir"), 0o755); err != nil {
+		t.Fatalf("Mkdir(job-dir) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dirs.input, "job-dir", "part1.bin"), []byte("hello"), 0o644); err != nil {
+		t.Fatalf("WriteFile(part1) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dirs.input, "single.txt"), []byte("single"), 0o644); err != nil {
+		t.Fatalf("WriteFile(single) error = %v", err)
+	}
+
+	res, err := runner.RunOnceOrchestration(context.Background())
+	if err != nil {
+		t.Fatalf("RunOnceOrchestration() error = %v", err)
+	}
+	if !res.Found || res.Processed {
+		t.Fatalf("result = %+v, want Found=true Processed=false", res)
+	}
+	if got, want := res.FileName, "job-dir"; got != want {
+		t.Fatalf("result.FileName = %q, want %q", got, want)
+	}
+
+	if _, err := os.Stat(filepath.Join(res.InProgress, "part1.bin")); err != nil {
+		t.Fatalf("expected claimed directory contents in %q, stat err = %v", res.InProgress, err)
+	}
+	if _, err := os.Stat(filepath.Join(dirs.input, "single.txt")); err != nil {
+		t.Fatalf("expected input/single.txt to remain, stat err = %v", err)
+	}
+}
+
+func TestNewS3Runner_RejectsDirectoryTargetMode(t *testing.T) {
+	t.Parallel()
+
+	_, err := libfilerunner.NewS3Runner(libfilerunner.S3Config{
+		Bucket:           "bucket",
+		InputPrefix:      "input",
+		InProgressPrefix: "in-progress",
+		FailedPrefix:     "failed",
+		SelectTarget:     libfilerunner.SelectTargetDirectories,
+	})
+	if err == nil {
+		t.Fatalf("NewS3Runner() error = nil, want unsupported directory-target error")
+	}
+}
+
+func TestNewAzureBlobRunner_RejectsDirectoryTargetMode(t *testing.T) {
+	t.Parallel()
+
+	_, err := libfilerunner.NewAzureBlobRunner(libfilerunner.AzureBlobConfig{
+		AccountURL:       "https://example.blob.core.windows.net/",
+		Container:        "container",
+		InputPrefix:      "input",
+		InProgressPrefix: "in-progress",
+		FailedPrefix:     "failed",
+		SelectTarget:     libfilerunner.SelectTargetDirectories,
+	})
+	if err == nil {
+		t.Fatalf("NewAzureBlobRunner() error = nil, want unsupported directory-target error")
+	}
+}
+
 type dirsConfig struct {
 	input      string
 	inProgress string
@@ -283,6 +465,21 @@ func mustNewRunner(t *testing.T, dirs dirsConfig) *libfilerunner.DirectoryRunner
 		InputDir:      dirs.input,
 		InProgressDir: dirs.inProgress,
 		FailedDir:     dirs.failed,
+	})
+	if err != nil {
+		t.Fatalf("NewDirectoryRunner() error = %v", err)
+	}
+	return runner
+}
+
+func mustNewRunnerWithBatch(t *testing.T, dirs dirsConfig, batchSize int) *libfilerunner.DirectoryRunner {
+	t.Helper()
+
+	runner, err := libfilerunner.NewDirectoryRunner(libfilerunner.DirectoryConfig{
+		InputDir:      dirs.input,
+		InProgressDir: dirs.inProgress,
+		FailedDir:     dirs.failed,
+		BatchSize:     batchSize,
 	})
 	if err != nil {
 		t.Fatalf("NewDirectoryRunner() error = %v", err)

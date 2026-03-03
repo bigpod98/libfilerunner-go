@@ -165,6 +165,38 @@ func TestClaimedAzureBlobOperations_RespectCanceledContext(t *testing.T) {
 	}
 }
 
+func TestAzureBlobBackendCompleteAndFailClaim(t *testing.T) {
+	t.Parallel()
+
+	client := newMockAzureBlobClient(map[string][]byte{
+		"in-progress/a.txt": []byte("a"),
+		"in-progress/b.txt": []byte("b"),
+	})
+
+	backend, err := NewAzureBlobBackendFromClient(client, "container", "input", "in-progress", "failed")
+	if err != nil {
+		t.Fatalf("NewAzureBlobBackendFromClient() error = %v", err)
+	}
+
+	if err := backend.CompleteClaim(context.Background(), "in-progress/a.txt"); err != nil {
+		t.Fatalf("CompleteClaim() error = %v", err)
+	}
+	if client.has("in-progress/a.txt") {
+		t.Fatalf("expected completed blob removed")
+	}
+
+	failedKey, err := backend.FailClaim(context.Background(), "in-progress/b.txt")
+	if err != nil {
+		t.Fatalf("FailClaim() error = %v", err)
+	}
+	if got, want := failedKey, "failed/b.txt"; got != want {
+		t.Fatalf("failed key = %q, want %q", got, want)
+	}
+	if !client.has("failed/b.txt") {
+		t.Fatalf("expected failed/b.txt to exist")
+	}
+}
+
 type mockAzureBlobClient struct {
 	mu      sync.Mutex
 	objects map[string][]byte

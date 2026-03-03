@@ -218,6 +218,39 @@ func (b *AzureBlobBackend) ClaimNext(ctx context.Context) (*ClaimedAzureBlob, er
 	return nil, ErrNoFileAvailable
 }
 
+func (b *AzureBlobBackend) CompleteClaim(ctx context.Context, inProgressKey string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if strings.TrimSpace(inProgressKey) == "" {
+		return errors.New("in-progress key is required")
+	}
+	if !strings.HasPrefix(inProgressKey, b.InProgressPrefix) {
+		return errors.New("in-progress key is not in the configured in-progress prefix")
+	}
+	return b.deleteBlob(ctx, inProgressKey)
+}
+
+func (b *AzureBlobBackend) FailClaim(ctx context.Context, inProgressKey string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(inProgressKey) == "" {
+		return "", errors.New("in-progress key is required")
+	}
+	if !strings.HasPrefix(inProgressKey, b.InProgressPrefix) {
+		return "", errors.New("in-progress key is not in the configured in-progress prefix")
+	}
+
+	claimed := &ClaimedAzureBlob{
+		container: b.Container,
+		name:      path.Base(inProgressKey),
+		key:       inProgressKey,
+		client:    b.client,
+	}
+	return claimed.MoveToFailed(ctx, b.FailedPrefix)
+}
+
 func (o *ClaimedAzureBlob) Name() string {
 	return o.name
 }

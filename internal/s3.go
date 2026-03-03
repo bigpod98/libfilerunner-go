@@ -153,6 +153,39 @@ func (b *S3Backend) ClaimNext(ctx context.Context) (*ClaimedS3Object, error) {
 	return nil, ErrNoFileAvailable
 }
 
+func (b *S3Backend) CompleteClaim(ctx context.Context, inProgressKey string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if strings.TrimSpace(inProgressKey) == "" {
+		return errors.New("in-progress key is required")
+	}
+	if !strings.HasPrefix(inProgressKey, b.InProgressPrefix) {
+		return errors.New("in-progress key is not in the configured in-progress prefix")
+	}
+	return b.deleteObject(ctx, inProgressKey)
+}
+
+func (b *S3Backend) FailClaim(ctx context.Context, inProgressKey string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(inProgressKey) == "" {
+		return "", errors.New("in-progress key is required")
+	}
+	if !strings.HasPrefix(inProgressKey, b.InProgressPrefix) {
+		return "", errors.New("in-progress key is not in the configured in-progress prefix")
+	}
+
+	claimed := &ClaimedS3Object{
+		bucket: b.Bucket,
+		name:   path.Base(inProgressKey),
+		key:    inProgressKey,
+		client: b.client,
+	}
+	return claimed.MoveToFailed(ctx, b.FailedPrefix)
+}
+
 func (o *ClaimedS3Object) Name() string {
 	return o.name
 }

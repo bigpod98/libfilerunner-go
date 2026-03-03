@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 
 	libinternal "github.com/bigpod98/libfilerunner-go/internal"
 )
@@ -14,6 +15,8 @@ type DirectoryConfig struct {
 	InputDir      string
 	InProgressDir string
 	FailedDir     string
+	BatchSize     int
+	SelectTarget  SelectTarget
 }
 
 // S3Config configures the V1 S3 queue flow.
@@ -23,6 +26,8 @@ type S3Config struct {
 	InputPrefix      string
 	InProgressPrefix string
 	FailedPrefix     string
+	BatchSize        int
+	SelectTarget     SelectTarget
 }
 
 // AzureBlobConfig configures the V1 Azure Blob queue flow.
@@ -32,7 +37,16 @@ type AzureBlobConfig struct {
 	InputPrefix      string
 	InProgressPrefix string
 	FailedPrefix     string
+	BatchSize        int
+	SelectTarget     SelectTarget
 }
+
+type SelectTarget string
+
+const (
+	SelectTargetFiles       SelectTarget = "files"
+	SelectTargetDirectories SelectTarget = "directories"
+)
 
 // FileJob is the file handed to the consumer while it is in the in-progress directory.
 type FileJob struct {
@@ -71,28 +85,44 @@ type RunResult struct {
 
 // DirectoryRunner implements a V1 single-poll queue processor using local directories.
 type DirectoryRunner struct {
-	backend *libinternal.DirectoryBackend
+	backend   *libinternal.DirectoryBackend
+	batchSize int
 }
 
 // S3Runner implements a V1 single-poll queue processor using S3 prefixes.
 type S3Runner struct {
-	backend *libinternal.S3Backend
+	backend   *libinternal.S3Backend
+	batchSize int
 }
 
 // AzureBlobRunner implements a V1 single-poll queue processor using Azure Blob prefixes.
 type AzureBlobRunner struct {
-	backend *libinternal.AzureBlobBackend
+	backend   *libinternal.AzureBlobBackend
+	batchSize int
 }
 
 func NewDirectoryRunner(cfg DirectoryConfig) (*DirectoryRunner, error) {
-	backend, err := libinternal.NewDirectoryBackend(cfg.InputDir, cfg.InProgressDir, cfg.FailedDir)
+	claimDirs, err := normalizeSelectTarget(cfg.SelectTarget)
 	if err != nil {
 		return nil, err
 	}
-	return &DirectoryRunner{backend: backend}, nil
+
+	backend, err := libinternal.NewDirectoryBackend(cfg.InputDir, cfg.InProgressDir, cfg.FailedDir, claimDirs)
+	if err != nil {
+		return nil, err
+	}
+	return &DirectoryRunner{backend: backend, batchSize: normalizeBatchSize(cfg.BatchSize)}, nil
 }
 
 func NewS3Runner(cfg S3Config) (*S3Runner, error) {
+	claimDirs, err := normalizeSelectTarget(cfg.SelectTarget)
+	if err != nil {
+		return nil, err
+	}
+	if claimDirs {
+		return nil, errors.New("S3 directory targets are not supported yet")
+	}
+
 	backend, err := libinternal.NewS3Backend(
 		cfg.Region,
 		cfg.Bucket,
@@ -103,10 +133,18 @@ func NewS3Runner(cfg S3Config) (*S3Runner, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &S3Runner{backend: backend}, nil
+	return &S3Runner{backend: backend, batchSize: normalizeBatchSize(cfg.BatchSize)}, nil
 }
 
 func NewAzureBlobRunner(cfg AzureBlobConfig) (*AzureBlobRunner, error) {
+	claimDirs, err := normalizeSelectTarget(cfg.SelectTarget)
+	if err != nil {
+		return nil, err
+	}
+	if claimDirs {
+		return nil, errors.New("Azure Blob directory targets are not supported yet")
+	}
+
 	backend, err := libinternal.NewAzureBlobBackend(
 		cfg.AccountURL,
 		cfg.Container,
@@ -117,7 +155,7 @@ func NewAzureBlobRunner(cfg AzureBlobConfig) (*AzureBlobRunner, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &AzureBlobRunner{backend: backend}, nil
+	return &AzureBlobRunner{backend: backend, batchSize: normalizeBatchSize(cfg.BatchSize)}, nil
 }
 
 // EnsureDirectories creates the configured directories if they do not exist.
@@ -154,14 +192,24 @@ func (r *DirectoryRunner) RunOnceOrchestration(ctx context.Context) (RunOnceResu
 
 // Run processes files repeatedly until no file is available or an error occurs.
 func (r *DirectoryRunner) Run(ctx context.Context, handler Handler) (RunResult, error) {
-	return runRepeatedly(ctx, func(ctx context.Context) (RunOnceResult, error) {
+	return runRepeatedly(ctx, r.batchSize, func(ctx context.Context) (RunOnceResult, error) {
 		return r.RunOnce(ctx, handler)
 	})
 }
 
 // RunOrchestration repeatedly claims files until no file is available or an error occurs.
 func (r *DirectoryRunner) RunOrchestration(ctx context.Context) (RunResult, error) {
-	return runRepeatedly(ctx, r.RunOnceOrchestration)
+	return runRepeatedly(ctx, r.batchSize, r.RunOnceOrchestration)
+}
+
+// Completed marks a previously claimed in-progress file as completed by deleting it.
+func (r *DirectoryRunner) Completed(ctx context.Context, inProgress string) error {
+	return r.backend.CompleteClaim(ctx, inProgress)
+}
+
+// Failed marks a previously claimed in-progress file as failed by moving it to the failed directory.
+func (r *DirectoryRunner) Failed(ctx context.Context, inProgress string) (string, error) {
+	return r.backend.FailClaim(ctx, inProgress)
 }
 
 // RunOnce claims one object (if present), invokes the handler, then deletes or fails it.
@@ -193,14 +241,24 @@ func (r *S3Runner) RunOnceOrchestration(ctx context.Context) (RunOnceResult, err
 
 // Run processes objects repeatedly until no object is available or an error occurs.
 func (r *S3Runner) Run(ctx context.Context, handler Handler) (RunResult, error) {
-	return runRepeatedly(ctx, func(ctx context.Context) (RunOnceResult, error) {
+	return runRepeatedly(ctx, r.batchSize, func(ctx context.Context) (RunOnceResult, error) {
 		return r.RunOnce(ctx, handler)
 	})
 }
 
 // RunOrchestration repeatedly claims objects until no object is available or an error occurs.
 func (r *S3Runner) RunOrchestration(ctx context.Context) (RunResult, error) {
-	return runRepeatedly(ctx, r.RunOnceOrchestration)
+	return runRepeatedly(ctx, r.batchSize, r.RunOnceOrchestration)
+}
+
+// Completed marks a previously claimed in-progress object as completed by deleting it.
+func (r *S3Runner) Completed(ctx context.Context, inProgress string) error {
+	return r.backend.CompleteClaim(ctx, inProgress)
+}
+
+// Failed marks a previously claimed in-progress object as failed by moving it to the failed prefix.
+func (r *S3Runner) Failed(ctx context.Context, inProgress string) (string, error) {
+	return r.backend.FailClaim(ctx, inProgress)
 }
 
 // RunOnce claims one blob (if present), invokes the handler, then deletes or fails it.
@@ -232,14 +290,24 @@ func (r *AzureBlobRunner) RunOnceOrchestration(ctx context.Context) (RunOnceResu
 
 // Run processes blobs repeatedly until no blob is available or an error occurs.
 func (r *AzureBlobRunner) Run(ctx context.Context, handler Handler) (RunResult, error) {
-	return runRepeatedly(ctx, func(ctx context.Context) (RunOnceResult, error) {
+	return runRepeatedly(ctx, r.batchSize, func(ctx context.Context) (RunOnceResult, error) {
 		return r.RunOnce(ctx, handler)
 	})
 }
 
 // RunOrchestration repeatedly claims blobs until no blob is available or an error occurs.
 func (r *AzureBlobRunner) RunOrchestration(ctx context.Context) (RunResult, error) {
-	return runRepeatedly(ctx, r.RunOnceOrchestration)
+	return runRepeatedly(ctx, r.batchSize, r.RunOnceOrchestration)
+}
+
+// Completed marks a previously claimed in-progress blob as completed by deleting it.
+func (r *AzureBlobRunner) Completed(ctx context.Context, inProgress string) error {
+	return r.backend.CompleteClaim(ctx, inProgress)
+}
+
+// Failed marks a previously claimed in-progress blob as failed by moving it to the failed prefix.
+func (r *AzureBlobRunner) Failed(ctx context.Context, inProgress string) (string, error) {
+	return r.backend.FailClaim(ctx, inProgress)
 }
 
 type claimedItem interface {
@@ -320,10 +388,14 @@ func runOnceOrchestration(ctx context.Context, claim func(ctx context.Context) (
 	return result, nil
 }
 
-func runRepeatedly(ctx context.Context, runOnce func(context.Context) (RunOnceResult, error)) (RunResult, error) {
+func runRepeatedly(ctx context.Context, batchSize int, runOnce func(context.Context) (RunOnceResult, error)) (RunResult, error) {
 	var aggregate RunResult
 
 	for {
+		if batchSize > 0 && aggregate.FoundCount >= batchSize {
+			return aggregate, nil
+		}
+
 		if err := ctx.Err(); err != nil {
 			return aggregate, err
 		}
@@ -341,5 +413,23 @@ func runRepeatedly(ctx context.Context, runOnce func(context.Context) (RunOnceRe
 			aggregate.ProcessedCount++
 		}
 		aggregate.Last = result
+	}
+}
+
+func normalizeBatchSize(configured int) int {
+	if configured < 0 {
+		return 0
+	}
+	return configured
+}
+
+func normalizeSelectTarget(target SelectTarget) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(string(target))) {
+	case "", string(SelectTargetFiles):
+		return false, nil
+	case string(SelectTargetDirectories):
+		return true, nil
+	default:
+		return false, errors.New("select target must be either files or directories")
 	}
 }

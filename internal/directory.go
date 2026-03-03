@@ -18,15 +18,17 @@ type DirectoryBackend struct {
 	InputDir      string
 	InProgressDir string
 	FailedDir     string
+	ClaimDirs     bool
 }
 
 // ClaimedFile represents a file currently parked in the in-progress directory.
 type ClaimedFile struct {
-	name string
-	path string
+	name  string
+	path  string
+	isDir bool
 }
 
-func NewDirectoryBackend(inputDir, inProgressDir, failedDir string) (*DirectoryBackend, error) {
+func NewDirectoryBackend(inputDir, inProgressDir, failedDir string, claimDirs bool) (*DirectoryBackend, error) {
 	if strings.TrimSpace(inputDir) == "" {
 		return nil, errors.New("input directory is required")
 	}
@@ -44,6 +46,7 @@ func NewDirectoryBackend(inputDir, inProgressDir, failedDir string) (*DirectoryB
 		InputDir:      inputDir,
 		InProgressDir: inProgressDir,
 		FailedDir:     failedDir,
+		ClaimDirs:     claimDirs,
 	}, nil
 }
 
@@ -77,7 +80,7 @@ func (b *DirectoryBackend) ClaimNext(ctx context.Context) (*ClaimedFile, error) 
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		if entry.IsDir() {
+		if b.ClaimDirs != entry.IsDir() {
 			continue
 		}
 
@@ -97,12 +100,51 @@ func (b *DirectoryBackend) ClaimNext(ctx context.Context) (*ClaimedFile, error) 
 		}
 
 		return &ClaimedFile{
-			name: filepath.Base(dst),
-			path: dst,
+			name:  filepath.Base(dst),
+			path:  dst,
+			isDir: entry.IsDir(),
 		}, nil
 	}
 
 	return nil, ErrNoFileAvailable
+}
+
+func (b *DirectoryBackend) CompleteClaim(ctx context.Context, inProgressPath string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if strings.TrimSpace(inProgressPath) == "" {
+		return errors.New("in-progress path is required")
+	}
+	if filepath.Dir(inProgressPath) != b.InProgressDir {
+		return errors.New("in-progress path is not in the configured in-progress directory")
+	}
+	info, err := os.Stat(inProgressPath)
+	if err != nil {
+		return err
+	}
+	if info.IsDir() {
+		return os.RemoveAll(inProgressPath)
+	}
+	return os.Remove(inProgressPath)
+}
+
+func (b *DirectoryBackend) FailClaim(ctx context.Context, inProgressPath string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(inProgressPath) == "" {
+		return "", errors.New("in-progress path is required")
+	}
+	if filepath.Dir(inProgressPath) != b.InProgressDir {
+		return "", errors.New("in-progress path is not in the configured in-progress directory")
+	}
+
+	claimed := &ClaimedFile{name: filepath.Base(inProgressPath), path: inProgressPath}
+	if info, err := os.Stat(inProgressPath); err == nil {
+		claimed.isDir = info.IsDir()
+	}
+	return claimed.MoveToFailed(ctx, b.FailedDir)
 }
 
 func (f *ClaimedFile) Name() string {
@@ -123,6 +165,9 @@ func (f *ClaimedFile) Open(ctx context.Context) (io.ReadCloser, error) {
 func (f *ClaimedFile) Delete(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	if f.isDir {
+		return os.RemoveAll(f.path)
 	}
 	return os.Remove(f.path)
 }

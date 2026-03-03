@@ -16,7 +16,7 @@ func TestDirectoryBackendClaimNext_PicksLexicographicallyAndMovesToInProgress(t 
 	inProgressDir := filepath.Join(root, "in-progress")
 	failedDir := filepath.Join(root, "failed")
 
-	backend, err := NewDirectoryBackend(inputDir, inProgressDir, failedDir)
+	backend, err := NewDirectoryBackend(inputDir, inProgressDir, failedDir, false)
 	if err != nil {
 		t.Fatalf("NewDirectoryBackend() error = %v", err)
 	}
@@ -58,6 +58,7 @@ func TestDirectoryBackendClaimNext_NoFileAvailable(t *testing.T) {
 		filepath.Join(root, "input"),
 		filepath.Join(root, "in-progress"),
 		filepath.Join(root, "failed"),
+		false,
 	)
 	if err != nil {
 		t.Fatalf("NewDirectoryBackend() error = %v", err)
@@ -69,6 +70,51 @@ func TestDirectoryBackendClaimNext_NoFileAvailable(t *testing.T) {
 	_, err = backend.ClaimNext(context.Background())
 	if !errors.Is(err, ErrNoFileAvailable) {
 		t.Fatalf("ClaimNext() error = %v, want %v", err, ErrNoFileAvailable)
+	}
+}
+
+func TestDirectoryBackendClaimNext_DirectoryTargetModeClaimsDirectories(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	inputDir := filepath.Join(root, "input")
+	inProgressDir := filepath.Join(root, "in-progress")
+	failedDir := filepath.Join(root, "failed")
+
+	backend, err := NewDirectoryBackend(inputDir, inProgressDir, failedDir, true)
+	if err != nil {
+		t.Fatalf("NewDirectoryBackend() error = %v", err)
+	}
+	if err := backend.EnsureDirectories(); err != nil {
+		t.Fatalf("EnsureDirectories() error = %v", err)
+	}
+
+	if err := os.Mkdir(filepath.Join(inputDir, "a-dir"), 0o755); err != nil {
+		t.Fatalf("Mkdir(a-dir) error = %v", err)
+	}
+	mustWriteFile(t, filepath.Join(inputDir, "a-dir", "part1.bin"), "a")
+	mustWriteFile(t, filepath.Join(inputDir, "single.txt"), "x")
+
+	claimed, err := backend.ClaimNext(context.Background())
+	if err != nil {
+		t.Fatalf("ClaimNext() error = %v", err)
+	}
+
+	if got, want := claimed.Name(), "a-dir"; got != want {
+		t.Fatalf("claimed.Name() = %q, want %q", got, want)
+	}
+	if got := claimed.Path(); filepath.Dir(got) != inProgressDir {
+		t.Fatalf("claimed.Path() dir = %q, want %q", filepath.Dir(got), inProgressDir)
+	}
+
+	if _, err := os.Stat(filepath.Join(inputDir, "a-dir")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected input/a-dir to be moved, stat err = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(inProgressDir, "a-dir", "part1.bin")); err != nil {
+		t.Fatalf("expected in-progress/a-dir/part1.bin to exist, stat err = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(inputDir, "single.txt")); err != nil {
+		t.Fatalf("expected input/single.txt to remain, stat err = %v", err)
 	}
 }
 
@@ -138,6 +184,45 @@ func TestClaimedFileOperations_RespectCanceledContext(t *testing.T) {
 
 	if _, err := os.Stat(inProgressPath); err != nil {
 		t.Fatalf("expected source file to remain, stat err = %v", err)
+	}
+}
+
+func TestDirectoryBackendCompleteAndFailClaim(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	inputDir := filepath.Join(root, "input")
+	inProgressDir := filepath.Join(root, "in-progress")
+	failedDir := filepath.Join(root, "failed")
+
+	backend, err := NewDirectoryBackend(inputDir, inProgressDir, failedDir, false)
+	if err != nil {
+		t.Fatalf("NewDirectoryBackend() error = %v", err)
+	}
+	if err := backend.EnsureDirectories(); err != nil {
+		t.Fatalf("EnsureDirectories() error = %v", err)
+	}
+
+	inProgressA := filepath.Join(inProgressDir, "a.txt")
+	mustWriteFile(t, inProgressA, "a")
+	if err := backend.CompleteClaim(context.Background(), inProgressA); err != nil {
+		t.Fatalf("CompleteClaim() error = %v", err)
+	}
+	if _, err := os.Stat(inProgressA); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected completed file removed, stat err = %v", err)
+	}
+
+	inProgressB := filepath.Join(inProgressDir, "b.txt")
+	mustWriteFile(t, inProgressB, "b")
+	failedPath, err := backend.FailClaim(context.Background(), inProgressB)
+	if err != nil {
+		t.Fatalf("FailClaim() error = %v", err)
+	}
+	if failedPath == "" {
+		t.Fatalf("FailClaim() path is empty")
+	}
+	if _, err := os.Stat(failedPath); err != nil {
+		t.Fatalf("expected failed file to exist, stat err = %v", err)
 	}
 }
 

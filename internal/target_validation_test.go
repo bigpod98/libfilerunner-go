@@ -14,6 +14,7 @@ func TestNewDirectoryBackend_RejectsOverlappingTargets(t *testing.T) {
 		filepath.Join(root, "queue"),
 		filepath.Join(root, "queue", "in-progress"),
 		filepath.Join(root, "failed"),
+		false,
 	)
 	if err == nil || !strings.Contains(err.Error(), "must not overlap") {
 		t.Fatalf("NewDirectoryBackend() error = %v, want overlap validation error", err)
