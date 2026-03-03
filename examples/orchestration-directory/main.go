@@ -27,6 +27,16 @@ func main() {
 
 	ctx := context.Background()
 	for {
+		queue, err := runner.Queue(ctx)
+		if err != nil {
+			log.Fatalf("Queue() error: %v", err)
+		}
+		inProgress, err := runner.InProgress(ctx)
+		if err != nil {
+			log.Fatalf("InProgress() error: %v", err)
+		}
+		log.Printf("snapshot queue=%d in-progress=%d", queue.Count, inProgress.Count)
+
 		claim, err := runner.RunOnceOrchestration(ctx)
 		if err != nil {
 			log.Fatalf("RunOnceOrchestration() error: %v", err)

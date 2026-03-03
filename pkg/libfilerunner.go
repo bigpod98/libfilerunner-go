@@ -89,6 +89,12 @@ type RunResult struct {
 	Last           RunOnceResult
 }
 
+// QueueItems describes currently claimable work in the input queue.
+type QueueItems struct {
+	Count int
+	Names []string
+}
+
 // DirectoryRunner implements a V1 single-poll queue processor using local directories.
 type DirectoryRunner struct {
 	backend   *libinternal.DirectoryBackend
@@ -214,6 +220,24 @@ func (r *DirectoryRunner) Failed(ctx context.Context, inProgress string) (string
 	return r.backend.FailClaim(ctx, inProgress)
 }
 
+// Queue returns current claimable item names in the input queue.
+func (r *DirectoryRunner) Queue(ctx context.Context) (QueueItems, error) {
+	names, err := r.backend.ListQueueItemNames(ctx)
+	if err != nil {
+		return QueueItems{}, err
+	}
+	return QueueItems{Count: len(names), Names: names}, nil
+}
+
+// InProgress returns current in-progress item names.
+func (r *DirectoryRunner) InProgress(ctx context.Context) (QueueItems, error) {
+	names, err := r.backend.ListInProgressItemNames(ctx)
+	if err != nil {
+		return QueueItems{}, err
+	}
+	return QueueItems{Count: len(names), Names: names}, nil
+}
+
 // RunOnce claims one object (if present), invokes the handler, then deletes or fails it.
 //
 // Success path: input prefix -> in-progress prefix -> delete
@@ -263,6 +287,24 @@ func (r *S3Runner) Failed(ctx context.Context, inProgress string) (string, error
 	return r.backend.FailClaim(ctx, inProgress)
 }
 
+// Queue returns current claimable item names in the input queue.
+func (r *S3Runner) Queue(ctx context.Context) (QueueItems, error) {
+	names, err := r.backend.ListQueueItemNames(ctx)
+	if err != nil {
+		return QueueItems{}, err
+	}
+	return QueueItems{Count: len(names), Names: names}, nil
+}
+
+// InProgress returns current in-progress item names.
+func (r *S3Runner) InProgress(ctx context.Context) (QueueItems, error) {
+	names, err := r.backend.ListInProgressItemNames(ctx)
+	if err != nil {
+		return QueueItems{}, err
+	}
+	return QueueItems{Count: len(names), Names: names}, nil
+}
+
 // RunOnce claims one blob (if present), invokes the handler, then deletes or fails it.
 //
 // Success path: input prefix -> in-progress prefix -> delete
@@ -310,6 +352,24 @@ func (r *AzureBlobRunner) Completed(ctx context.Context, inProgress string) erro
 // Failed marks a previously claimed in-progress blob as failed by moving it to the failed prefix.
 func (r *AzureBlobRunner) Failed(ctx context.Context, inProgress string) (string, error) {
 	return r.backend.FailClaim(ctx, inProgress)
+}
+
+// Queue returns current claimable item names in the input queue.
+func (r *AzureBlobRunner) Queue(ctx context.Context) (QueueItems, error) {
+	names, err := r.backend.ListQueueItemNames(ctx)
+	if err != nil {
+		return QueueItems{}, err
+	}
+	return QueueItems{Count: len(names), Names: names}, nil
+}
+
+// InProgress returns current in-progress item names.
+func (r *AzureBlobRunner) InProgress(ctx context.Context) (QueueItems, error) {
+	names, err := r.backend.ListInProgressItemNames(ctx)
+	if err != nil {
+		return QueueItems{}, err
+	}
+	return QueueItems{Count: len(names), Names: names}, nil
 }
 
 type claimedItem interface {

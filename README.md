@@ -32,6 +32,26 @@ All runners (`DirectoryRunner`, `S3Runner`, `AzureBlobRunner`) expose:
 - `RunOrchestration(ctx)` - repeat claim-only flow until queue empty or `BatchSize` reached.
 - `Completed(ctx, inProgressPath)` - finalize success.
 - `Failed(ctx, inProgressPath)` - finalize failure and move to failed target.
+- `Queue(ctx)` - returns current claimable item count and names for dashboards.
+- `InProgress(ctx)` - returns current in-progress item count and names for dashboards.
+
+### Dashboard snapshot example
+
+```go
+queue, err := runner.Queue(ctx)
+if err != nil {
+    return err
+}
+
+inProgress, err := runner.InProgress(ctx)
+if err != nil {
+    return err
+}
+
+log.Printf("queue=%d in_progress=%d", queue.Count, inProgress.Count)
+log.Printf("queue items: %v", queue.Names)
+log.Printf("in-progress items: %v", inProgress.Names)
+```
 
 ## Migration Notes (handler-coupled -> orchestration)
 

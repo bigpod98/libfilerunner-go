@@ -164,6 +164,92 @@ func TestDirectoryBackendClaimNext_ConcurrentClaimersSingleWinner(t *testing.T) 
 	}
 }
 
+func TestDirectoryBackendListQueueItemNames(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	inputDir := filepath.Join(root, "input")
+	inProgressDir := filepath.Join(root, "in-progress")
+	failedDir := filepath.Join(root, "failed")
+
+	backend, err := NewDirectoryBackend(inputDir, inProgressDir, failedDir, false)
+	if err != nil {
+		t.Fatalf("NewDirectoryBackend() error = %v", err)
+	}
+	if err := backend.EnsureDirectories(); err != nil {
+		t.Fatalf("EnsureDirectories() error = %v", err)
+	}
+	mustWriteFile(t, filepath.Join(inputDir, "a.txt"), "a")
+	mustWriteFile(t, filepath.Join(inputDir, "b.txt"), "b")
+	if err := os.Mkdir(filepath.Join(inputDir, "dir"), 0o755); err != nil {
+		t.Fatalf("Mkdir(dir) error = %v", err)
+	}
+
+	names, err := backend.ListQueueItemNames(context.Background())
+	if err != nil {
+		t.Fatalf("ListQueueItemNames() error = %v", err)
+	}
+	if len(names) != 2 {
+		t.Fatalf("len(names) = %d, want 2", len(names))
+	}
+}
+
+func TestDirectoryBackendListQueueItemNames_DirectoryMode(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	inputDir := filepath.Join(root, "input")
+	inProgressDir := filepath.Join(root, "in-progress")
+	failedDir := filepath.Join(root, "failed")
+
+	backend, err := NewDirectoryBackend(inputDir, inProgressDir, failedDir, true)
+	if err != nil {
+		t.Fatalf("NewDirectoryBackend() error = %v", err)
+	}
+	if err := backend.EnsureDirectories(); err != nil {
+		t.Fatalf("EnsureDirectories() error = %v", err)
+	}
+	if err := os.Mkdir(filepath.Join(inputDir, "dir-a"), 0o755); err != nil {
+		t.Fatalf("Mkdir(dir-a) error = %v", err)
+	}
+	mustWriteFile(t, filepath.Join(inputDir, "single.txt"), "x")
+
+	names, err := backend.ListQueueItemNames(context.Background())
+	if err != nil {
+		t.Fatalf("ListQueueItemNames() error = %v", err)
+	}
+	if len(names) != 1 || names[0] != "dir-a" {
+		t.Fatalf("names = %#v, want [dir-a]", names)
+	}
+}
+
+func TestDirectoryBackendListInProgressItemNames(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	inputDir := filepath.Join(root, "input")
+	inProgressDir := filepath.Join(root, "in-progress")
+	failedDir := filepath.Join(root, "failed")
+
+	backend, err := NewDirectoryBackend(inputDir, inProgressDir, failedDir, false)
+	if err != nil {
+		t.Fatalf("NewDirectoryBackend() error = %v", err)
+	}
+	if err := backend.EnsureDirectories(); err != nil {
+		t.Fatalf("EnsureDirectories() error = %v", err)
+	}
+	mustWriteFile(t, filepath.Join(inProgressDir, "a.txt"), "a")
+	mustWriteFile(t, filepath.Join(inProgressDir, "b.txt"), "b")
+
+	names, err := backend.ListInProgressItemNames(context.Background())
+	if err != nil {
+		t.Fatalf("ListInProgressItemNames() error = %v", err)
+	}
+	if len(names) != 2 {
+		t.Fatalf("len(names) = %d, want 2", len(names))
+	}
+}
+
 func TestClaimedFileMoveToFailed_AddsUniqueSuffixOnCollision(t *testing.T) {
 	t.Parallel()
 

@@ -104,6 +104,54 @@ func (b *DirectoryBackend) ClaimNext(ctx context.Context) (*ClaimedFile, error) 
 	return nil, ErrNoFileAvailable
 }
 
+func (b *DirectoryBackend) ListQueueItemNames(ctx context.Context) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	entries, err := os.ReadDir(b.InputDir)
+	if err != nil {
+		return nil, err
+	}
+
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if b.ClaimDirs != entry.IsDir() {
+			continue
+		}
+		names = append(names, entry.Name())
+	}
+
+	return names, nil
+}
+
+func (b *DirectoryBackend) ListInProgressItemNames(ctx context.Context) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	entries, err := os.ReadDir(b.InProgressDir)
+	if err != nil {
+		return nil, err
+	}
+
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if b.ClaimDirs != entry.IsDir() {
+			continue
+		}
+		names = append(names, entry.Name())
+	}
+
+	return names, nil
+}
+
 func (b *DirectoryBackend) CompleteClaim(ctx context.Context, inProgressPath string) error {
 	if err := ctx.Err(); err != nil {
 		return err

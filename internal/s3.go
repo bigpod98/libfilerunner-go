@@ -165,6 +165,58 @@ func (b *S3Backend) ClaimNext(ctx context.Context) (*ClaimedS3Object, error) {
 	return nil, ErrNoFileAvailable
 }
 
+func (b *S3Backend) ListQueueItemNames(ctx context.Context) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	objects, err := b.listInputObjects(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	if b.ClaimDirs {
+		dirSuffixes := s3FirstLevelDirectorySuffixes(objects, b.InputPrefix)
+		names := make([]string, 0, len(dirSuffixes))
+		for _, suffix := range dirSuffixes {
+			names = append(names, strings.TrimSuffix(suffix, "/"))
+		}
+		return names, nil
+	}
+
+	names := make([]string, 0, len(objects))
+	for _, obj := range objects {
+		names = append(names, strings.TrimPrefix(obj.key, b.InputPrefix))
+	}
+	return names, nil
+}
+
+func (b *S3Backend) ListInProgressItemNames(ctx context.Context) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	objects, err := b.listObjectsWithPrefix(ctx, b.InProgressPrefix)
+	if err != nil {
+		return nil, err
+	}
+
+	if b.ClaimDirs {
+		dirSuffixes := s3FirstLevelDirectorySuffixes(objects, b.InProgressPrefix)
+		names := make([]string, 0, len(dirSuffixes))
+		for _, suffix := range dirSuffixes {
+			names = append(names, strings.TrimSuffix(suffix, "/"))
+		}
+		return names, nil
+	}
+
+	names := make([]string, 0, len(objects))
+	for _, obj := range objects {
+		names = append(names, strings.TrimPrefix(obj.key, b.InProgressPrefix))
+	}
+	return names, nil
+}
+
 func (b *S3Backend) claimNextDirectory(ctx context.Context, objects []listedS3Object) (*ClaimedS3Object, error) {
 	dirSuffixes := s3FirstLevelDirectorySuffixes(objects, b.InputPrefix)
 	for _, dirSuffix := range dirSuffixes {

@@ -232,6 +232,58 @@ func (b *AzureBlobBackend) ClaimNext(ctx context.Context) (*ClaimedAzureBlob, er
 	return nil, ErrNoFileAvailable
 }
 
+func (b *AzureBlobBackend) ListQueueItemNames(ctx context.Context) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	keys, err := b.listInputKeys(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	if b.ClaimDirs {
+		dirSuffixes := firstLevelDirectorySuffixesFromKeys(keys, b.InputPrefix)
+		names := make([]string, 0, len(dirSuffixes))
+		for _, suffix := range dirSuffixes {
+			names = append(names, strings.TrimSuffix(suffix, "/"))
+		}
+		return names, nil
+	}
+
+	names := make([]string, 0, len(keys))
+	for _, key := range keys {
+		names = append(names, strings.TrimPrefix(key, b.InputPrefix))
+	}
+	return names, nil
+}
+
+func (b *AzureBlobBackend) ListInProgressItemNames(ctx context.Context) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	keys, err := b.listKeysWithPrefix(ctx, b.InProgressPrefix)
+	if err != nil {
+		return nil, err
+	}
+
+	if b.ClaimDirs {
+		dirSuffixes := firstLevelDirectorySuffixesFromKeys(keys, b.InProgressPrefix)
+		names := make([]string, 0, len(dirSuffixes))
+		for _, suffix := range dirSuffixes {
+			names = append(names, strings.TrimSuffix(suffix, "/"))
+		}
+		return names, nil
+	}
+
+	names := make([]string, 0, len(keys))
+	for _, key := range keys {
+		names = append(names, strings.TrimPrefix(key, b.InProgressPrefix))
+	}
+	return names, nil
+}
+
 func (b *AzureBlobBackend) claimNextDirectory(ctx context.Context, keys []string) (*ClaimedAzureBlob, error) {
 	dirSuffixes := firstLevelDirectorySuffixesFromKeys(keys, b.InputPrefix)
 	for _, dirSuffix := range dirSuffixes {

@@ -140,6 +140,74 @@ func TestAzureBlobBackendClaimNext_ConcurrentClaimersSingleWinner(t *testing.T) 
 	}
 }
 
+func TestAzureBlobBackendListQueueItemNames(t *testing.T) {
+	t.Parallel()
+
+	client := newMockAzureBlobClient(map[string][]byte{
+		"input/a.txt": []byte("a"),
+		"input/b.txt": []byte("b"),
+	})
+
+	backend, err := NewAzureBlobBackendFromClient(client, "container", "input", "in-progress", "failed")
+	if err != nil {
+		t.Fatalf("NewAzureBlobBackendFromClient() error = %v", err)
+	}
+
+	names, err := backend.ListQueueItemNames(context.Background())
+	if err != nil {
+		t.Fatalf("ListQueueItemNames() error = %v", err)
+	}
+	if len(names) != 2 {
+		t.Fatalf("len(names) = %d, want 2", len(names))
+	}
+}
+
+func TestAzureBlobBackendListQueueItemNames_DirectoryMode(t *testing.T) {
+	t.Parallel()
+
+	client := newMockAzureBlobClient(map[string][]byte{
+		"input/dir-a/part1.bin": []byte("a1"),
+		"input/dir-b/part1.bin": []byte("b1"),
+		"input/single.txt":      []byte("single"),
+	})
+
+	backend, err := NewAzureBlobBackendFromClient(client, "container", "input", "in-progress", "failed")
+	if err != nil {
+		t.Fatalf("NewAzureBlobBackendFromClient() error = %v", err)
+	}
+	backend.ClaimDirs = true
+
+	names, err := backend.ListQueueItemNames(context.Background())
+	if err != nil {
+		t.Fatalf("ListQueueItemNames() error = %v", err)
+	}
+	if len(names) != 2 {
+		t.Fatalf("len(names) = %d, want 2", len(names))
+	}
+}
+
+func TestAzureBlobBackendListInProgressItemNames(t *testing.T) {
+	t.Parallel()
+
+	client := newMockAzureBlobClient(map[string][]byte{
+		"in-progress/a.txt": []byte("a"),
+		"in-progress/b.txt": []byte("b"),
+	})
+
+	backend, err := NewAzureBlobBackendFromClient(client, "container", "input", "in-progress", "failed")
+	if err != nil {
+		t.Fatalf("NewAzureBlobBackendFromClient() error = %v", err)
+	}
+
+	names, err := backend.ListInProgressItemNames(context.Background())
+	if err != nil {
+		t.Fatalf("ListInProgressItemNames() error = %v", err)
+	}
+	if len(names) != 2 {
+		t.Fatalf("len(names) = %d, want 2", len(names))
+	}
+}
+
 func TestClaimedAzureBlobMoveToFailed_AddsUniqueSuffixOnCollision(t *testing.T) {
 	t.Parallel()
 

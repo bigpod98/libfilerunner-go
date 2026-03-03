@@ -22,3 +22,10 @@ Track planned work for the `v1.1.0` release here.
 - [x] Publish orchestration-focused examples for directory, S3, and Azure Blob (claim -> process -> complete/fail)
 - [x] Add API docs for orchestration lifecycle methods and recommended call order
 - [x] Add migration notes from handler-coupled `RunOnce` to orchestration flow
+
+# TODO - v1.2.0
+
+- [x] Add method to check number of items in queue and name of them
+  - primary usage are dashboards
+- [x] similar API should also allow to see what items are in progress(and the number of them)
+- [x] examples and documentation for new features

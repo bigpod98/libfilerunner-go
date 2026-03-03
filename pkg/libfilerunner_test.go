@@ -152,6 +152,64 @@ func TestDirectoryRunnerRunOnceOrchestration_ClaimCanceled(t *testing.T) {
 	}
 }
 
+func TestDirectoryRunnerQueue_ReturnsCountAndNames(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	dirs := queueDirs(root)
+	runner := mustNewRunner(t, dirs)
+	if err := runner.EnsureDirectories(); err != nil {
+		t.Fatalf("EnsureDirectories() error = %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(dirs.input, "a.txt"), []byte("a"), 0o644); err != nil {
+		t.Fatalf("WriteFile(a) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dirs.input, "b.txt"), []byte("b"), 0o644); err != nil {
+		t.Fatalf("WriteFile(b) error = %v", err)
+	}
+
+	queue, err := runner.Queue(context.Background())
+	if err != nil {
+		t.Fatalf("Queue() error = %v", err)
+	}
+	if queue.Count != 2 {
+		t.Fatalf("queue.Count = %d, want 2", queue.Count)
+	}
+	if len(queue.Names) != 2 {
+		t.Fatalf("len(queue.Names) = %d, want 2", len(queue.Names))
+	}
+}
+
+func TestDirectoryRunnerInProgress_ReturnsCountAndNames(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	dirs := queueDirs(root)
+	runner := mustNewRunner(t, dirs)
+	if err := runner.EnsureDirectories(); err != nil {
+		t.Fatalf("EnsureDirectories() error = %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(dirs.inProgress, "a.txt"), []byte("a"), 0o644); err != nil {
+		t.Fatalf("WriteFile(a) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dirs.inProgress, "b.txt"), []byte("b"), 0o644); err != nil {
+		t.Fatalf("WriteFile(b) error = %v", err)
+	}
+
+	queue, err := runner.InProgress(context.Background())
+	if err != nil {
+		t.Fatalf("InProgress() error = %v", err)
+	}
+	if queue.Count != 2 {
+		t.Fatalf("queue.Count = %d, want 2", queue.Count)
+	}
+	if len(queue.Names) != 2 {
+		t.Fatalf("len(queue.Names) = %d, want 2", len(queue.Names))
+	}
+}
+
 func TestDirectoryRunnerRunOnceOrchestration_ClaimsWithoutFinalizing(t *testing.T) {
 	t.Parallel()
 

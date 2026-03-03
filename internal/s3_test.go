@@ -145,6 +145,74 @@ func TestS3BackendClaimNext_ConcurrentClaimersSingleWinner(t *testing.T) {
 	}
 }
 
+func TestS3BackendListQueueItemNames(t *testing.T) {
+	t.Parallel()
+
+	client := newMockS3Client(map[string][]byte{
+		"input/a.txt": []byte("a"),
+		"input/b.txt": []byte("b"),
+	})
+
+	backend, err := NewS3BackendFromClient(client, "bucket", "input", "in-progress", "failed")
+	if err != nil {
+		t.Fatalf("NewS3BackendFromClient() error = %v", err)
+	}
+
+	names, err := backend.ListQueueItemNames(context.Background())
+	if err != nil {
+		t.Fatalf("ListQueueItemNames() error = %v", err)
+	}
+	if len(names) != 2 {
+		t.Fatalf("len(names) = %d, want 2", len(names))
+	}
+}
+
+func TestS3BackendListQueueItemNames_DirectoryMode(t *testing.T) {
+	t.Parallel()
+
+	client := newMockS3Client(map[string][]byte{
+		"input/dir-a/part1.bin": []byte("a1"),
+		"input/dir-b/part1.bin": []byte("b1"),
+		"input/single.txt":      []byte("single"),
+	})
+
+	backend, err := NewS3BackendFromClient(client, "bucket", "input", "in-progress", "failed")
+	if err != nil {
+		t.Fatalf("NewS3BackendFromClient() error = %v", err)
+	}
+	backend.ClaimDirs = true
+
+	names, err := backend.ListQueueItemNames(context.Background())
+	if err != nil {
+		t.Fatalf("ListQueueItemNames() error = %v", err)
+	}
+	if len(names) != 2 {
+		t.Fatalf("len(names) = %d, want 2", len(names))
+	}
+}
+
+func TestS3BackendListInProgressItemNames(t *testing.T) {
+	t.Parallel()
+
+	client := newMockS3Client(map[string][]byte{
+		"in-progress/a.txt": []byte("a"),
+		"in-progress/b.txt": []byte("b"),
+	})
+
+	backend, err := NewS3BackendFromClient(client, "bucket", "input", "in-progress", "failed")
+	if err != nil {
+		t.Fatalf("NewS3BackendFromClient() error = %v", err)
+	}
+
+	names, err := backend.ListInProgressItemNames(context.Background())
+	if err != nil {
+		t.Fatalf("ListInProgressItemNames() error = %v", err)
+	}
+	if len(names) != 2 {
+		t.Fatalf("len(names) = %d, want 2", len(names))
+	}
+}
+
 func TestClaimedS3ObjectMoveToFailed_AddsUniqueSuffixOnCollision(t *testing.T) {
 	t.Parallel()
 
