@@ -133,6 +133,135 @@ func TestDirectoryRunnerRunOnce_NoFileReturnsEmptyResult(t *testing.T) {
 	}
 }
 
+func TestDirectoryRunnerRunOnceOrchestration_ClaimsWithoutFinalizing(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	dirs := queueDirs(root)
+	runner := mustNewRunner(t, dirs)
+	if err := runner.EnsureDirectories(); err != nil {
+		t.Fatalf("EnsureDirectories() error = %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(dirs.input, "job.txt"), []byte("hello"), 0o644); err != nil {
+		t.Fatalf("WriteFile(input) error = %v", err)
+	}
+
+	res, err := runner.RunOnceOrchestration(context.Background())
+	if err != nil {
+		t.Fatalf("RunOnceOrchestration() error = %v", err)
+	}
+
+	if !res.Found {
+		t.Fatalf("result = %+v, want Found=true", res)
+	}
+	if res.Processed {
+		t.Fatalf("result.Processed = true, want false")
+	}
+	if res.FileName != "job.txt" {
+		t.Fatalf("result.FileName = %q, want %q", res.FileName, "job.txt")
+	}
+	if res.InProgress == "" {
+		t.Fatalf("result.InProgress is empty, want claimed path")
+	}
+
+	assertNotExists(t, filepath.Join(dirs.input, "job.txt"))
+	if _, statErr := os.Stat(res.InProgress); statErr != nil {
+		t.Fatalf("expected in-progress file to exist at %q, stat err = %v", res.InProgress, statErr)
+	}
+	assertNotExists(t, filepath.Join(dirs.failed, "job.txt"))
+}
+
+func TestDirectoryRunnerRunOrchestration_ClaimsAllAvailableFiles(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	dirs := queueDirs(root)
+	runner := mustNewRunner(t, dirs)
+	if err := runner.EnsureDirectories(); err != nil {
+		t.Fatalf("EnsureDirectories() error = %v", err)
+	}
+
+	for _, name := range []string{"a.txt", "b.txt"} {
+		if err := os.WriteFile(filepath.Join(dirs.input, name), []byte(name), 0o644); err != nil {
+			t.Fatalf("WriteFile(%q) error = %v", name, err)
+		}
+	}
+
+	runRes, err := runner.RunOrchestration(context.Background())
+	if err != nil {
+		t.Fatalf("RunOrchestration() error = %v", err)
+	}
+
+	if runRes.FoundCount != 2 {
+		t.Fatalf("runRes.FoundCount = %d, want 2", runRes.FoundCount)
+	}
+	if runRes.ProcessedCount != 0 {
+		t.Fatalf("runRes.ProcessedCount = %d, want 0", runRes.ProcessedCount)
+	}
+	if !runRes.Last.Found || runRes.Last.Processed {
+		t.Fatalf("runRes.Last = %+v, want Found=true Processed=false", runRes.Last)
+	}
+
+	inProgressEntries, err := os.ReadDir(dirs.inProgress)
+	if err != nil {
+		t.Fatalf("ReadDir(inProgress) error = %v", err)
+	}
+	if len(inProgressEntries) != 2 {
+		t.Fatalf("in-progress entry count = %d, want 2", len(inProgressEntries))
+	}
+
+	assertNotExists(t, filepath.Join(dirs.input, "a.txt"))
+	assertNotExists(t, filepath.Join(dirs.input, "b.txt"))
+}
+
+func TestDirectoryRunnerRun_ProcessesUntilQueueEmpty(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	dirs := queueDirs(root)
+	runner := mustNewRunner(t, dirs)
+	if err := runner.EnsureDirectories(); err != nil {
+		t.Fatalf("EnsureDirectories() error = %v", err)
+	}
+
+	for _, name := range []string{"a.txt", "b.txt"} {
+		if err := os.WriteFile(filepath.Join(dirs.input, name), []byte(name), 0o644); err != nil {
+			t.Fatalf("WriteFile(%q) error = %v", name, err)
+		}
+	}
+
+	handlerCalls := 0
+	runRes, err := runner.Run(context.Background(), func(ctx context.Context, job libfilerunner.FileJob) error {
+		handlerCalls++
+		f, err := job.Open()
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+
+		_, err = io.ReadAll(f)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	if handlerCalls != 2 {
+		t.Fatalf("handlerCalls = %d, want 2", handlerCalls)
+	}
+	if runRes.FoundCount != 2 || runRes.ProcessedCount != 2 {
+		t.Fatalf("runRes = %+v, want FoundCount=2 ProcessedCount=2", runRes)
+	}
+
+	assertNotExists(t, filepath.Join(dirs.input, "a.txt"))
+	assertNotExists(t, filepath.Join(dirs.input, "b.txt"))
+	assertNotExists(t, filepath.Join(dirs.inProgress, "a.txt"))
+	assertNotExists(t, filepath.Join(dirs.inProgress, "b.txt"))
+	assertNotExists(t, filepath.Join(dirs.failed, "a.txt"))
+	assertNotExists(t, filepath.Join(dirs.failed, "b.txt"))
+}
+
 type dirsConfig struct {
 	input      string
 	inProgress string

@@ -62,6 +62,13 @@ type RunOnceResult struct {
 	HandlerErr error
 }
 
+// RunResult aggregates outcomes across repeated RunOnce/RunOnceOrchestration calls.
+type RunResult struct {
+	FoundCount     int
+	ProcessedCount int
+	Last           RunOnceResult
+}
+
 // DirectoryRunner implements a V1 single-poll queue processor using local directories.
 type DirectoryRunner struct {
 	backend *libinternal.DirectoryBackend
@@ -123,51 +130,38 @@ func (r *DirectoryRunner) EnsureDirectories() error {
 // Success path: input -> in-progress -> delete
 // Failure path: input -> in-progress -> failed
 func (r *DirectoryRunner) RunOnce(ctx context.Context, handler Handler) (RunOnceResult, error) {
-	var result RunOnceResult
-
-	if handler == nil {
-		return result, errors.New("handler is required")
-	}
-	if err := ctx.Err(); err != nil {
-		return result, err
-	}
-
-	claimed, err := r.backend.ClaimNext(ctx)
-	if err != nil {
-		if errors.Is(err, libinternal.ErrNoFileAvailable) {
-			return result, nil
+	return runOnceWithHandler(ctx, handler, r.backend.FailedDir, func(ctx context.Context) (claimedItem, error) {
+		claimed, err := r.backend.ClaimNext(ctx)
+		if err != nil {
+			return nil, err
 		}
-		return result, err
-	}
+		return claimed, nil
+	})
+}
 
-	result.Found = true
-	result.Processed = true
-	result.FileName = claimed.Name()
-	result.InProgress = claimed.Path()
-
-	job := FileJob{
-		Name: claimed.Name(),
-		Path: claimed.Path(),
-		open: func() (io.ReadCloser, error) {
-			return claimed.Open(ctx)
-		},
-	}
-
-	if handlerErr := handler(ctx, job); handlerErr != nil {
-		result.HandlerErr = handlerErr
-		failedPath, moveErr := claimed.MoveToFailed(ctx, r.backend.FailedDir)
-		if moveErr != nil {
-			return result, fmt.Errorf("handler failed: %w; additionally failed to move file to failed directory: %v", handlerErr, moveErr)
+// RunOnceOrchestration claims one file (if present) and leaves it in in-progress.
+//
+// This variant does not invoke a handler and does not move/delete the claimed file.
+func (r *DirectoryRunner) RunOnceOrchestration(ctx context.Context) (RunOnceResult, error) {
+	return runOnceOrchestration(ctx, func(ctx context.Context) (claimedItem, error) {
+		claimed, err := r.backend.ClaimNext(ctx)
+		if err != nil {
+			return nil, err
 		}
-		result.FailedPath = failedPath
-		return result, handlerErr
-	}
+		return claimed, nil
+	})
+}
 
-	if err := claimed.Delete(ctx); err != nil {
-		return result, err
-	}
+// Run processes files repeatedly until no file is available or an error occurs.
+func (r *DirectoryRunner) Run(ctx context.Context, handler Handler) (RunResult, error) {
+	return runRepeatedly(ctx, func(ctx context.Context) (RunOnceResult, error) {
+		return r.RunOnce(ctx, handler)
+	})
+}
 
-	return result, nil
+// RunOrchestration repeatedly claims files until no file is available or an error occurs.
+func (r *DirectoryRunner) RunOrchestration(ctx context.Context) (RunResult, error) {
+	return runRepeatedly(ctx, r.RunOnceOrchestration)
 }
 
 // RunOnce claims one object (if present), invokes the handler, then deletes or fails it.
@@ -175,6 +169,88 @@ func (r *DirectoryRunner) RunOnce(ctx context.Context, handler Handler) (RunOnce
 // Success path: input prefix -> in-progress prefix -> delete
 // Failure path: input prefix -> in-progress prefix -> failed prefix
 func (r *S3Runner) RunOnce(ctx context.Context, handler Handler) (RunOnceResult, error) {
+	return runOnceWithHandler(ctx, handler, r.backend.FailedPrefix, func(ctx context.Context) (claimedItem, error) {
+		claimed, err := r.backend.ClaimNext(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return claimed, nil
+	})
+}
+
+// RunOnceOrchestration claims one object (if present) and leaves it in in-progress.
+//
+// This variant does not invoke a handler and does not move/delete the claimed object.
+func (r *S3Runner) RunOnceOrchestration(ctx context.Context) (RunOnceResult, error) {
+	return runOnceOrchestration(ctx, func(ctx context.Context) (claimedItem, error) {
+		claimed, err := r.backend.ClaimNext(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return claimed, nil
+	})
+}
+
+// Run processes objects repeatedly until no object is available or an error occurs.
+func (r *S3Runner) Run(ctx context.Context, handler Handler) (RunResult, error) {
+	return runRepeatedly(ctx, func(ctx context.Context) (RunOnceResult, error) {
+		return r.RunOnce(ctx, handler)
+	})
+}
+
+// RunOrchestration repeatedly claims objects until no object is available or an error occurs.
+func (r *S3Runner) RunOrchestration(ctx context.Context) (RunResult, error) {
+	return runRepeatedly(ctx, r.RunOnceOrchestration)
+}
+
+// RunOnce claims one blob (if present), invokes the handler, then deletes or fails it.
+//
+// Success path: input prefix -> in-progress prefix -> delete
+// Failure path: input prefix -> in-progress prefix -> failed prefix
+func (r *AzureBlobRunner) RunOnce(ctx context.Context, handler Handler) (RunOnceResult, error) {
+	return runOnceWithHandler(ctx, handler, r.backend.FailedPrefix, func(ctx context.Context) (claimedItem, error) {
+		claimed, err := r.backend.ClaimNext(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return claimed, nil
+	})
+}
+
+// RunOnceOrchestration claims one blob (if present) and leaves it in in-progress.
+//
+// This variant does not invoke a handler and does not move/delete the claimed blob.
+func (r *AzureBlobRunner) RunOnceOrchestration(ctx context.Context) (RunOnceResult, error) {
+	return runOnceOrchestration(ctx, func(ctx context.Context) (claimedItem, error) {
+		claimed, err := r.backend.ClaimNext(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return claimed, nil
+	})
+}
+
+// Run processes blobs repeatedly until no blob is available or an error occurs.
+func (r *AzureBlobRunner) Run(ctx context.Context, handler Handler) (RunResult, error) {
+	return runRepeatedly(ctx, func(ctx context.Context) (RunOnceResult, error) {
+		return r.RunOnce(ctx, handler)
+	})
+}
+
+// RunOrchestration repeatedly claims blobs until no blob is available or an error occurs.
+func (r *AzureBlobRunner) RunOrchestration(ctx context.Context) (RunResult, error) {
+	return runRepeatedly(ctx, r.RunOnceOrchestration)
+}
+
+type claimedItem interface {
+	Name() string
+	Path() string
+	Open(ctx context.Context) (io.ReadCloser, error)
+	Delete(ctx context.Context) error
+	MoveToFailed(ctx context.Context, failedTarget string) (string, error)
+}
+
+func runOnceWithHandler(ctx context.Context, handler Handler, failedTarget string, claim func(ctx context.Context) (claimedItem, error)) (RunOnceResult, error) {
 	var result RunOnceResult
 
 	if handler == nil {
@@ -184,7 +260,7 @@ func (r *S3Runner) RunOnce(ctx context.Context, handler Handler) (RunOnceResult,
 		return result, err
 	}
 
-	claimed, err := r.backend.ClaimNext(ctx)
+	claimed, err := claim(ctx)
 	if err != nil {
 		if errors.Is(err, libinternal.ErrNoFileAvailable) {
 			return result, nil
@@ -207,9 +283,9 @@ func (r *S3Runner) RunOnce(ctx context.Context, handler Handler) (RunOnceResult,
 
 	if handlerErr := handler(ctx, job); handlerErr != nil {
 		result.HandlerErr = handlerErr
-		failedPath, moveErr := claimed.MoveToFailed(ctx, r.backend.FailedPrefix)
+		failedPath, moveErr := claimed.MoveToFailed(ctx, failedTarget)
 		if moveErr != nil {
-			return result, fmt.Errorf("handler failed: %w; additionally failed to move file to failed directory: %v", handlerErr, moveErr)
+			return result, fmt.Errorf("handler failed: %w; additionally failed to move file to failed target: %v", handlerErr, moveErr)
 		}
 		result.FailedPath = failedPath
 		return result, handlerErr
@@ -222,21 +298,13 @@ func (r *S3Runner) RunOnce(ctx context.Context, handler Handler) (RunOnceResult,
 	return result, nil
 }
 
-// RunOnce claims one blob (if present), invokes the handler, then deletes or fails it.
-//
-// Success path: input prefix -> in-progress prefix -> delete
-// Failure path: input prefix -> in-progress prefix -> failed prefix
-func (r *AzureBlobRunner) RunOnce(ctx context.Context, handler Handler) (RunOnceResult, error) {
+func runOnceOrchestration(ctx context.Context, claim func(ctx context.Context) (claimedItem, error)) (RunOnceResult, error) {
 	var result RunOnceResult
-
-	if handler == nil {
-		return result, errors.New("handler is required")
-	}
 	if err := ctx.Err(); err != nil {
 		return result, err
 	}
 
-	claimed, err := r.backend.ClaimNext(ctx)
+	claimed, err := claim(ctx)
 	if err != nil {
 		if errors.Is(err, libinternal.ErrNoFileAvailable) {
 			return result, nil
@@ -245,31 +313,33 @@ func (r *AzureBlobRunner) RunOnce(ctx context.Context, handler Handler) (RunOnce
 	}
 
 	result.Found = true
-	result.Processed = true
 	result.FileName = claimed.Name()
 	result.InProgress = claimed.Path()
-
-	job := FileJob{
-		Name: claimed.Name(),
-		Path: claimed.Path(),
-		open: func() (io.ReadCloser, error) {
-			return claimed.Open(ctx)
-		},
-	}
-
-	if handlerErr := handler(ctx, job); handlerErr != nil {
-		result.HandlerErr = handlerErr
-		failedPath, moveErr := claimed.MoveToFailed(ctx, r.backend.FailedPrefix)
-		if moveErr != nil {
-			return result, fmt.Errorf("handler failed: %w; additionally failed to move file to failed directory: %v", handlerErr, moveErr)
-		}
-		result.FailedPath = failedPath
-		return result, handlerErr
-	}
-
-	if err := claimed.Delete(ctx); err != nil {
-		return result, err
-	}
+	result.Processed = false
 
 	return result, nil
+}
+
+func runRepeatedly(ctx context.Context, runOnce func(context.Context) (RunOnceResult, error)) (RunResult, error) {
+	var aggregate RunResult
+
+	for {
+		if err := ctx.Err(); err != nil {
+			return aggregate, err
+		}
+
+		result, err := runOnce(ctx)
+		if err != nil {
+			return aggregate, err
+		}
+		if !result.Found {
+			return aggregate, nil
+		}
+
+		aggregate.FoundCount++
+		if result.Processed {
+			aggregate.ProcessedCount++
+		}
+		aggregate.Last = result
+	}
 }
